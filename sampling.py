@@ -2,12 +2,13 @@ import jax
 from jax import Array, random
 import jax.numpy as jnp
 from typing import List, Tuple, Optional, Dict, TypedDict
-from flax.training.train_state import TrainState
-from flax.core import FrozenDict
+from flax import nnx
+from model import DiTModel
 from dataclasses import dataclass
 from PIL import Image
 from tqdm import tqdm
 from utils import denormalize_images
+
 
 ln = False
 
@@ -54,98 +55,93 @@ def ddpm_schedules(beta_start: float, beta_end: float, n_T: int) -> DDPMSchedule
 
 
 def rectified_flow_step(
-    state: TrainState,
+    model: DiTModel,
+    optimizer: nnx.Optimizer,
     image: Array,
     label: Array,
     prng_key: Array,
     training: bool = True,
-) -> Tuple[Array, Optional[TrainState]]:
+) -> Array:
     prng_key, step_key = random.split(prng_key)
 
-    def rectified_flow_loss(params: FrozenDict, x: Array, cond: Array, rng_key: Array):
+    def rectified_flow_loss(model: DiTModel, rng_key: Array):
         """
         Rectified Flow sampling.
         https://huggingface.co/blog/Isamu136/insta-rectified-flow
         Sample a single timestep and get loss
         """
-        b = x.shape[0]
+        b = image.shape[0]
         if ln:
             t = jax.nn.sigmoid(random.normal(rng_key, (b,)))
         else:
             t = random.uniform(rng_key, (b,))
 
-        texp = t.reshape([b] + [1] * (len(x.shape) - 1))  # expand dims
-        z1 = random.normal(rng_key, x.shape)  # random noise
+        texp = t.reshape([b] + [1] * (len(image.shape) - 1))  # expand dims
+        z1 = random.normal(rng_key, image.shape)  # random noise
         # zt is the mixture of x and z1 at timestep t
-        zt = (1 - texp) * x + texp * z1
+        zt = (1 - texp) * image + texp * z1
         # vtheta is the output of the model - predicts velocity at timestep t
-        vtheta = state.apply_fn({"params": params}, zt, t, cond, rng_key, training)
-
+        vtheta = model(zt, t, label, training)
         # MSE of the model output and the noise
         # can think of this as predicting velocity for each timestep, with the expected
         # velocity being constant for all timesteps
         batchwise_mse = jnp.mean(
-            (z1 - x - vtheta) ** 2, axis=tuple(range(1, len(x.shape)))
+            (z1 - image - vtheta) ** 2, axis=tuple(range(1, len(image.shape)))
         )
 
         return batchwise_mse.mean()
 
     if training:
-        loss, grads = jax.value_and_grad(rectified_flow_loss)(
-            state.params, image, label, step_key
-        )
-        return loss, state.apply_gradients(grads=grads)
+        loss, grad = nnx.value_and_grad(rectified_flow_loss)(model, step_key)
+        optimizer.update(grad)
+        return loss
     else:
-        loss = rectified_flow_loss(state.params, image, label, step_key)
-        return loss, state
+        loss = rectified_flow_loss(model, step_key)
+        return loss
 
 
 def ddpm_step(
-    state: TrainState,
+    model: DiTModel,
+    optimizer: nnx.Optimizer,
     image: Array,
     label: Array,
     prng_key: Array,
     noise_schedule: Dict[str, jnp.ndarray],
     n_timesteps: int,
     training: bool,
-) -> Tuple[Array, Optional[TrainState]]:
+) -> Array:
     prng_key, step_key = random.split(prng_key)
 
-    def ddpm_loss(params: FrozenDict, x: Array, cond: Array, rng_key: Array):
-        """
-        # Sample a
-        """
+    def ddpm_loss(model: DiTModel, rng_key: Array):
 
-        _ts = random.randint(rng_key, (x.shape[0],), 1, n_timesteps + 1)
-        eps = random.normal(rng_key, x.shape)
+        _ts = random.randint(rng_key, (image.shape[0],), 1, n_timesteps + 1)
+        eps = random.normal(rng_key, image.shape)
 
         # this gives the noise level for the timestep, which the model is conditioned on
-        x_t = noise_schedule["sqrtab"][_ts] * x + noise_schedule["sqrtmab"][_ts] * eps
+        x_t = (
+            noise_schedule["sqrtab"][_ts] * image + noise_schedule["sqrtmab"][_ts] * eps
+        )
 
         ts_scaled = _ts / n_timesteps
-        loss = state.apply_fn({"params": params}, x_t, ts_scaled, cond, rng_key)
+        loss = model(x_t, ts_scaled, label, training)
         return loss
 
     if training:
-        loss, grads = jax.value_and_grad(ddpm_loss)(
-            state.params, image, label, step_key
-        )
-        return loss, state.apply_gradients(grads=grads)
+        loss, grad = nnx.value_and_grad(ddpm_loss)(model, step_key)
+        optimizer.update(grad)
+
+        return loss
     else:
-        loss = ddpm_loss(state.params, image, label, step_key)
-        return loss, None
+        loss = ddpm_loss(model, step_key)
+        return loss
 
 
-@jax.jit
-def sample_loop(
-    z, t, cond, train_state: TrainState, cfg, null_cond, dt, rng_key
-):
-    v_cond = train_state.apply_fn({"params": train_state.params}, z, t, cond, rng_key, False)
+@nnx.jit
+def sample_loop(z, t, cond, model: DiTModel, cfg, null_cond, dt, rng_key):
+    v_cond = model(z, t, cond, train=False)
     # CFG
     if null_cond is not None:
-        v_uncond = train_state.apply_fn(
-            {"params": train_state.params}, z, t, null_cond, rng_key, False
-        )
+        v_uncond = model(z, t, null_cond, train=False)
         v_cond = v_uncond + cfg * (v_cond - v_uncond)
 
     z = z - dt * v_cond
@@ -154,7 +150,7 @@ def sample_loop(
 
 # TODO jit this fn
 def rectified_flow_sample(
-    train_state: TrainState,
+    model: DiTModel,
     z: Array,
     cond: Array,
     rng_key: Array,
@@ -172,9 +168,7 @@ def rectified_flow_sample(
         t = i / sample_steps
         t = jnp.array([t] * b)
         outs.append(z)
-        z = sample_loop(
-            z, t, cond, train_state, cfg, null_cond, dt, rng_key
-        )
+        z = sample_loop(z, t, cond, model, cfg, null_cond, dt, rng_key)
 
     images = jnp.stack(outs, axis=0)
     images = images.transpose((0, 1, 3, 4, 2))

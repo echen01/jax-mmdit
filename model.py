@@ -1,33 +1,34 @@
 from chex import PRNGKey
 from jax import Array, lax
 import jax.numpy as jnp
-import flax.linen as nn
+from flax import nnx
 import jax
 from jax.nn import initializers, swish
 from typing import Optional
-from flax.linen import LayerNorm, dot_product_attention, dot_product_attention_weights
+from flax.nnx import LayerNorm, dot_product_attention
 from jax.lax import Precision
 
 
-class TimestepEmbedder(nn.Module):
+class TimestepEmbedder(nnx.Module):
     """
     Rotational positional encoding for tiemestep.
     TODO can we dedupe the positional encoding code?
     """
 
-    hidden_size: int
-    frequency_embedding_size: int
+    def __init__(self, hidden_size: int, frequency_embedding_size: int, rngs: nnx.Rngs):
 
-    @nn.compact
+        self.hidden_size = hidden_size
+        self.frequency_embedding_size = frequency_embedding_size
+
+        self.linear1 = nnx.Linear(frequency_embedding_size, hidden_size, rngs=rngs)
+        self.linear2 = nnx.Linear(hidden_size, hidden_size, rngs=rngs)
+
     def __call__(self, t: Array) -> Array:
         t_freq = self.timestep_embedding(t, self.frequency_embedding_size)
-        t_emb: Array = nn.Sequential(
-            [
-                nn.Dense(self.hidden_size),
-                nn.silu,
-                nn.Dense(self.hidden_size),
-            ]
-        )(t_freq)
+        t_emb = self.linear1(t_freq)
+        t_emb = nnx.silu(t_emb)
+        t_emb = self.linear2(t_emb)
+
         return t_emb
 
     @staticmethod
@@ -46,63 +47,89 @@ class TimestepEmbedder(nn.Module):
         return embedding
 
 
-class LabelEmbedder(nn.Module):
-    num_classes: int
-    hidden_size: int
-    dropout_prob: float
+class LabelEmbedder(nnx.Module):
 
-    def setup(self):
+    def __init__(
+        self, num_classes: int, hidden_size: int, dropout_prob: float, rngs: nnx.Rngs
+    ):
+        self.num_classes = num_classes
+        self.hidden_size = hidden_size
+        self.dropout_prob = dropout_prob
+
         use_cfg_embedding = int(self.dropout_prob > 0)
-        self.embedding_table = nn.Embed(
+        self.embedding_table = nnx.Embed(
             num_embeddings=self.num_classes + use_cfg_embedding,
             features=self.hidden_size,
+            rngs=rngs,
         )
 
-    def __call__(self, labels: Array, train: bool, rng: PRNGKey, force_drop_ids=None):
+        self.rngs = rngs
+
+    def __call__(self, labels: Array, train: bool, force_drop_ids=None):
         use_dropout = self.dropout_prob > 0
         labels = labels.astype(jnp.int32)
 
         # drop N labels from the input
         if (train and use_dropout) or (force_drop_ids is not None):
-            labels = self.token_drop(labels, rng, force_drop_ids)
+            labels = self.token_drop(labels, force_drop_ids)
         embeddings = self.embedding_table(labels)
         return embeddings
 
-    def token_drop(self, labels: Array, rng: PRNGKey, force_drop_ids=None):
+    def token_drop(self, labels: Array, force_drop_ids=None):
         """
         Randomly drop labels from the input. This is needed
         to support unconditional generation.
         """
         if force_drop_ids is None:
-            drop_ids = jax.random.bernoulli(rng, self.dropout_prob, labels.shape)
+            drop_ids = jax.random.bernoulli(
+                self.rngs.dropout(), self.dropout_prob, labels.shape
+            )
         else:
             drop_ids = force_drop_ids == 1
         labels = jnp.where(drop_ids, self.num_classes, labels)
         return labels
 
 
-class Attention(nn.Module):
-    dim: int
-    n_heads: int
-    dtype: jnp.dtype
+class Attention(nnx.Module):
 
-    def setup(self):
-        self.head_dim = self.dim // self.n_heads
+    def __init__(self, dim: int, n_heads: int, dtype: jnp.dtype, rngs: nnx.Rngs):
+        self.dim = dim
+        self.n_heads = n_heads
+        self.dtype = dtype
+        self.rngs = rngs
 
-        self.wq = nn.Dense(
-            self.n_heads * self.head_dim, use_bias=False, dtype=self.dtype
+        self.head_dim = dim // n_heads
+
+        self.wq = nnx.Linear(
+            dim,
+            self.n_heads * self.head_dim,
+            use_bias=False,
+            dtype=self.dtype,
+            rngs=rngs,
         )
-        self.wk = nn.Dense(
-            self.n_heads * self.head_dim, use_bias=False, dtype=self.dtype
+        self.wk = nnx.Linear(
+            dim,
+            self.n_heads * self.head_dim,
+            use_bias=False,
+            dtype=self.dtype,
+            rngs=rngs,
         )
-        self.wv = nn.Dense(
-            self.n_heads * self.head_dim, use_bias=False, dtype=self.dtype
+        self.wv = nnx.Linear(
+            dim,
+            self.n_heads * self.head_dim,
+            use_bias=False,
+            dtype=self.dtype,
+            rngs=rngs,
         )
 
-        self.wo = nn.Dense(self.dim, use_bias=False)
+        self.wo = nnx.Linear(self.dim, self.dim, use_bias=False, rngs=rngs)
 
-        self.q_norm = LayerNorm(dtype=self.dtype)
-        self.k_norm = LayerNorm(dtype=self.dtype)
+        self.q_norm = LayerNorm(
+            self.n_heads * self.head_dim, dtype=self.dtype, rngs=rngs
+        )
+        self.k_norm = LayerNorm(
+            self.n_heads * self.head_dim, dtype=self.dtype, rngs=rngs
+        )
 
     @staticmethod
     def reshape_for_broadcast(freqs_cis: Array, x: Array):
@@ -157,7 +184,6 @@ class Attention(nn.Module):
             xk,
             xv,
             deterministic=True,
-            force_fp32_for_softmax=True,
             precision=Precision.DEFAULT,
         )
 
@@ -167,43 +193,49 @@ class Attention(nn.Module):
         return output
 
 
-class FeedForward(nn.Module):
+class FeedForward(nnx.Module):
     """
     AKA MLP block. Contract from hidden_dim, to dim, and back to hidden_dim.
     """
 
-    dtype: jnp.dtype
-    dim: int
-    hidden_dim: int
-    multiple_of: int
-    ffn_dim_multiplier: Optional[float] = None
+    def __init__(
+        self,
+        dtype: jnp.dtype,
+        dim: int,
+        hidden_dim: int,
+        multiple_of: int,
+        rngs: nnx.Rngs,
+        ffn_dim_multiplier: Optional[float] = None,
+    ):
 
-    def setup(self):
+        hidden_dim = int(2 * hidden_dim / 3)
+        if ffn_dim_multiplier:
+            hidden_dim = int(ffn_dim_multiplier * hidden_dim)
+        hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
 
-        hidden_dim = int(2 * self.hidden_dim / 3)
-        if self.ffn_dim_multiplier:
-            hidden_dim = int(self.ffn_dim_multiplier * hidden_dim)
-        hidden_dim = self.multiple_of * (
-            (hidden_dim + self.multiple_of - 1) // self.multiple_of
-        )
-
-        self.in_layer = nn.Dense(
-            features=hidden_dim,
+        self.in_layer = nnx.Linear(
+            dim,
+            hidden_dim,
             use_bias=False,
             kernel_init=initializers.xavier_uniform(),
-            dtype=self.dtype,
+            dtype=dtype,
+            rngs=rngs,
         )
-        self.mid_layer = nn.Dense(
-            features=self.dim,
+        self.mid_layer = nnx.Linear(
+            hidden_dim,
+            dim,
             use_bias=False,
             kernel_init=initializers.xavier_uniform(),
-            dtype=self.dtype,
+            dtype=dtype,
+            rngs=rngs,
         )
-        self.out_layer = nn.Dense(
-            features=hidden_dim,
+        self.out_layer = nnx.Linear(
+            dim,
+            hidden_dim,
             use_bias=False,
             kernel_init=initializers.xavier_uniform(),
-            dtype=self.dtype,
+            dtype=dtype,
+            rngs=rngs,
         )
 
     def __call__(self, x):
@@ -217,37 +249,50 @@ def modulate(x, shift, scale):
     return x * (1 + jnp.expand_dims(scale, 1)) + jnp.expand_dims(shift, 1)
 
 
-class TransformerBlock(nn.Module):
-    layer_id: int
-    dim: int
-    n_heads: int
-    multiple_of: int
-    ffn_dim_multiplier: Optional[float]
-    norm_eps: float
-    dtype: jnp.dtype
+class TransformerBlock(nnx.Module):
 
-    def setup(self):
-        self.attention = Attention(dim=self.dim, n_heads=self.n_heads, dtype=self.dtype)
+    def __init__(
+        self,
+        layer_id: int,
+        dim: int,
+        n_heads: int,
+        multiple_of: int,
+        ffn_dim_multiplier: Optional[float],
+        norm_eps: float,
+        rngs: nnx.Rngs,
+        dtype: jnp.dtype,
+    ):
+        self.layer_id = layer_id
+        self.dim = dim
+        self.n_heads = n_heads
+        self.multiple_of = multiple_of
+        self.ffn_dim_multiplier = ffn_dim_multiplier
+        self.norm_eps = norm_eps
+        self.dtype = dtype
+        self.rngs = rngs
+
+        self.attention = Attention(dim=dim, n_heads=n_heads, dtype=dtype, rngs=rngs)
         self.feed_forward = FeedForward(
-            dtype=self.dtype,
-            dim=self.dim,
-            hidden_dim=4 * self.dim,
-            multiple_of=self.multiple_of,
-            ffn_dim_multiplier=self.ffn_dim_multiplier,
+            dtype=dtype,
+            dim=dim,
+            hidden_dim=4 * dim,
+            multiple_of=multiple_of,
+            ffn_dim_multiplier=ffn_dim_multiplier,
+            rngs=rngs,
         )
-        self.attention_norm = nn.LayerNorm(epsilon=self.norm_eps, dtype=self.dtype)
-        self.ffn_norm = nn.LayerNorm(epsilon=self.norm_eps, dtype=self.dtype)
+        self.attention_norm = nnx.LayerNorm(
+            dim, epsilon=norm_eps, dtype=dtype, rngs=rngs
+        )
+        self.ffn_norm = nnx.LayerNorm(dim, epsilon=norm_eps, dtype=dtype, rngs=rngs)
 
-        # modulate attention and ffn according to timestep and label embeddings
-        # NOTE this is how the timestep and label embeddings are applied to the model;
-        # applies a bias in attention and ffn
-        self.adaLN_modulation = nn.Sequential(
-            [
-                swish,
-                nn.Dense(
-                    features=6 * self.dim, kernel_init=nn.initializers.xavier_uniform()
-                ),
-            ]
+        self.adaLN_modulation = nnx.Sequential(
+            swish,
+            nnx.Linear(
+                dim,
+                6 * dim,
+                kernel_init=nnx.initializers.xavier_uniform(),
+                rngs=rngs,
+            ),
         )
 
     def __call__(
@@ -274,7 +319,7 @@ class TransformerBlock(nn.Module):
         return x
 
 
-class FinalLayer(nn.Module):
+class FinalLayer(nnx.Module):
     """
     Convert the transformer patch tokens back to image space, and apply modulation.
     """
@@ -284,22 +329,32 @@ class FinalLayer(nn.Module):
     patch_size: int
     out_channels: int
 
-    def setup(self):
-        self.norm_final = nn.LayerNorm(
-            epsilon=1e-6, use_bias=False, use_scale=False, dtype=self.dtype
+    def __init__(
+        self,
+        dtype: jnp.dtype,
+        dim: int,
+        patch_size: int,
+        out_channels: int,
+        rngs: nnx.Rngs,
+    ):
+
+        self.norm_final = nnx.LayerNorm(
+            dim, epsilon=1e-6, use_bias=False, use_scale=False, dtype=dtype, rngs=rngs
         )
-        self.linear = nn.Dense(
-            features=self.patch_size * self.patch_size * self.out_channels,
+
+        self.linear = nnx.Linear(
+            dim,
+            patch_size * patch_size * out_channels,
             use_bias=True,
             bias_init=initializers.zeros,
             kernel_init=initializers.zeros,
+            rngs=rngs,
         )
-        self.adaLN_modulation = nn.Sequential(
-            [
-                nn.Dense(features=min(self.dim, 1024), use_bias=True),
-                swish,
-                nn.Dense(features=2 * self.dim, use_bias=True),
-            ]
+
+        self.adaLN_modulation = nnx.Sequential(
+            nnx.Linear(min(dim, 1024), min(dim, 1024), use_bias=True, rngs=rngs),
+            swish,
+            nnx.Linear(min(dim, 1024), 2 * dim, use_bias=True, rngs=rngs),
         )
 
     def __call__(self, x: Array, c: Optional[Array]):
@@ -309,83 +364,93 @@ class FinalLayer(nn.Module):
         return self.linear(x)
 
 
-class DiTModel(nn.Module):
+class DiTModel(nnx.Module):
+    def __init__(
+        self,
+        in_channels: int = 3,
+        out_channels: int = 3,
+        input_size: int = 32,
+        patch_size: int = 2,
+        dim: int = 512,
+        n_layers: int = 5,
+        n_heads: int = 16,
+        multiple_of: int = 256,
+        ffn_dim_multiplier: Optional[float] = None,
+        norm_eps: float = 1e-5,
+        class_dropout_prob: float = 0.1,
+        n_classes: int = 200,
+        dtype: jnp.dtype = jnp.float32,
+        rngs: nnx.Rngs = nnx.Rngs(0),
+    ):
 
-    in_channels: int = 3
-    out_channels: int = 3
+        self.patch_size = patch_size
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.dim = dim
 
-    input_size: int = 32
-    patch_size: int = 2
-    dim: int = 512
-    n_layers: int = 5
-    n_heads: int = 16
-    multiple_of: int = 256
-    ffn_dim_multiplier: Optional[float] = None
-    norm_eps: float = 1e-5
-    class_dropout_prob: float = 0.1
-    n_classes: int = 200
-    dtype: jnp.dtype = jnp.float32
-
-    def setup(self):
-        self.init_conv_seq = nn.Sequential(
-            [
-                nn.Conv(
-                    features=self.dim // 2,
-                    kernel_size=(5, 5),
-                    padding="SAME",
-                    strides=(1, 1),
-                ),
-                swish,
-                nn.GroupNorm(num_groups=32),
-                nn.Conv(
-                    features=self.dim // 2,
-                    kernel_size=(5, 5),
-                    padding="SAME",
-                    strides=(1, 1),
-                ),
-                swish,
-                nn.GroupNorm(num_groups=32),
-            ]
+        self.init_conv_seq = nnx.Sequential(
+            nnx.Conv(
+                in_channels,
+                dim // 2,
+                kernel_size=(5, 5),
+                padding="SAME",
+                strides=(1, 1),
+                rngs=rngs,
+            ),
+            swish,
+            nnx.GroupNorm(dim // 2, num_groups=32, rngs=rngs),
+            nnx.Conv(
+                dim // 2,
+                dim // 2,
+                kernel_size=(5, 5),
+                padding="SAME",
+                strides=(1, 1),
+                rngs=rngs,
+            ),
+            swish,
+            nnx.GroupNorm(dim // 2, num_groups=32, rngs=rngs),
         )
 
-        self.x_embedder = nn.Dense(
-            features=self.dim, kernel_init=initializers.xavier_uniform(), use_bias=True
+        self.x_embedder = nnx.Linear(
+            dim // 2 * patch_size**2,
+            out_features=dim,
+            use_bias=True,
+            kernel_init=initializers.xavier_uniform(),
+            rngs=rngs,
         )
-
-        self.t_embedder = TimestepEmbedder(min(self.dim, 1024), 256)
+        self.t_embedder = TimestepEmbedder(min(dim, 1024), 256, rngs=rngs)
         self.y_embedder = LabelEmbedder(
-            self.n_classes, min(self.dim, 1024), self.class_dropout_prob
+            n_classes, min(dim, 1024), class_dropout_prob, rngs=rngs
         )
-
-        # NOTE this is not in the original DiT, but
-        # helps with smaller image sizes, as the positional
-        # encodings take a while to learn
-        self.pos_embedding = nn.Embed(
-            num_embeddings=self.input_size**2,
-            features=self.dim,
-            embedding_init=initializers.xavier_uniform(),
+        self.pos_embedding = nnx.Embed(
+            input_size**2, dim, embedding_init=initializers.xavier_uniform(), rngs=rngs
         )
 
         self.layers = [
             TransformerBlock(
                 layer_id=i,
-                dim=self.dim,
-                n_heads=self.n_heads,
-                multiple_of=self.multiple_of,
-                ffn_dim_multiplier=self.ffn_dim_multiplier,
-                norm_eps=self.norm_eps,
-                dtype=self.dtype,
+                dim=dim,
+                n_heads=n_heads,
+                multiple_of=multiple_of,
+                ffn_dim_multiplier=ffn_dim_multiplier,
+                norm_eps=norm_eps,
+                dtype=dtype,
+                rngs=rngs,
             )
-            for i in range(self.n_layers)
+            for i in range(n_layers)
         ]
 
         self.final_layer = FinalLayer(
-            self.dtype, self.dim, self.patch_size, self.out_channels
+            dtype=dtype,
+            dim=dim,
+            patch_size=patch_size,
+            out_channels=out_channels,
+            rngs=rngs,
         )
 
-        max_pos_encoding = (self.input_size // 2) ** 2
+        max_pos_encoding = (input_size // 2) ** 2
         self.freqs_sin, self.freqs_cos = self.precompute_freqs(
-            self.dim // self.n_heads, max_pos_encoding
+            dim // n_heads, max_pos_encoding
         )
 
     def patchify(self, x: Array):
@@ -426,7 +491,7 @@ class DiTModel(nn.Module):
         freqs_sin = jnp.sin(freqs)
         return freqs_sin, freqs_cos  # (maxlen, dim/2), (maxlen, dim/2)
 
-    def __call__(self, x: Array, t: Array, y: Array, rng: PRNGKey, train: bool):
+    def __call__(self, x: Array, t: Array, y: Array, train: bool):
         """
         x: latent or image tensor of shape (B, C, H, W)
         t: timestep tensor of shape (B,)
@@ -443,7 +508,7 @@ class DiTModel(nn.Module):
         x += self.pos_embedding(jnp.arange(x.shape[1]))
 
         t = self.t_embedder(t)
-        y = self.y_embedder(y, train=train, rng=rng)
+        y = self.y_embedder(y, train=train)
 
         adaln_input = t.astype(x.dtype) + y.astype(x.dtype)
 
@@ -454,10 +519,10 @@ class DiTModel(nn.Module):
         x = self.unpatchify(x)
         return x
 
-    def forward_with_cfg(self, x, t, y, cfg_scale, rng, train):
+    def forward_with_cfg(self, x, t, y, cfg_scale, train):
         half = x[: len(x) // 2]
         combined = jnp.concatenate([half, half], axis=0)
-        model_out = self(combined, t, y, rng, train)
+        model_out = self(combined, t, y, train)
         eps, rest = model_out[:, : self.in_channels], model_out[:, self.in_channels :]
         cond_eps, uncond_eps = jnp.split(eps, 2, axis=0)
         half_eps = uncond_eps + cfg_scale * (cond_eps - uncond_eps)

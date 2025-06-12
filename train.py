@@ -16,8 +16,7 @@ from chex import PRNGKey
 from datasets.arrow_dataset import Dataset
 from datasets.dataset_dict import DatasetDict
 from datasets.load import load_dataset
-from flax import linen as nn
-from flax.training.train_state import TrainState
+from flax import nnx
 from jax import random
 from jax.experimental import mesh_utils
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
@@ -31,6 +30,7 @@ from model import DiTModel
 from sampling import rectified_flow_sample, rectified_flow_step
 from utils import center_crop, ensure_directory, image_grid, normalize_images
 from profiling import memory_usage_params, trace_module_calls, get_peak_flops
+from jax import Array
 
 jax.experimental.compilation_cache.compilation_cache.set_cache_dir("jit_cache")
 
@@ -39,7 +39,7 @@ print("JAX devices: ", jax.devices())
 logger.info(f"JAX host count: {jax.device_count()}")
 
 
-def fmt_float_display(val: float | int) -> str:
+def fmt_float_display(val: Array | float | int) -> str:
     if val > 1e3:
         return f"{val:.2e}"
     return f"{val:3.3f}"
@@ -146,7 +146,10 @@ DATASET_CONFIGS = {
             "ship",
             "truck",
         ],
-        model_config=DIT_MODELS["L_2"],
+        eval_split_name="test",
+        dataset_length=50000,
+        model_config=DIT_MODELS["B_2"],
+        batch_size=96,
     ),
     # TODO find the class counts and resize with preprocessor
     "butterflies": DatasetConfig(
@@ -160,7 +163,7 @@ DATASET_CONFIGS = {
         n_channels=1,
         n_classes=10,
         latent_size=28,
-        batch_size=796 * 4,
+        batch_size=128,  # 796 * 4,
         eval_split_name="test",
         dataset_length=60000,
     ),
@@ -169,8 +172,9 @@ DATASET_CONFIGS = {
         n_channels=3,
         n_classes=102,
         latent_size=32,
-        batch_size=512 * 4,
+        batch_size=256,
         n_labels_to_sample=16,
+        eval_split_name="test",
         model_config=ModelConfig(dim=64, n_layers=10, n_heads=8),
     ),
     "fashion_mnist": DatasetConfig(
@@ -204,45 +208,31 @@ class Trainer:
         profile: bool = False,
         half_precision: bool = False,
     ) -> None:
-        self.optimizer = optax.chain(
-            optax.adam(learning_rate=learning_rate),
-        )
+
         init_key, self.train_key = random.split(rng, 2)
         latent_size, n_channels = dataset_config.latent_size, dataset_config.n_channels
         dtype = jnp.bfloat16 if half_precision else jnp.float32
 
-        self.model = DiTModel(
-            dim=dataset_config.model_config.dim,
-            n_layers=dataset_config.model_config.n_layers,
-            n_heads=dataset_config.model_config.n_heads,
-            input_size=latent_size,
-            in_channels=n_channels,
-            out_channels=n_channels,
-            n_classes=dataset_config.n_classes,
-            dtype=dtype,
-        )
+        @nnx.jit
+        def create_sharded_model():
+            model = DiTModel(
+                dim=dataset_config.model_config.dim,
+                n_layers=dataset_config.model_config.n_layers,
+                n_heads=dataset_config.model_config.n_heads,
+                input_size=latent_size,
+                in_channels=n_channels,
+                out_channels=n_channels,
+                n_classes=dataset_config.n_classes,
+                dtype=dtype,
+                rngs=nnx.Rngs(init_key),
+            )
+            state = nnx.state(model)
+            pspecs = nnx.get_partition_spec(state)
+            sharded_state = jax.lax.with_sharding_constraint(state, pspecs)
+            nnx.update(model, sharded_state)
+            return model
+
         n_devices = len(jax.devices())
-
-        # x, y, t
-        input_values = (
-            jnp.ones((n_devices, n_channels, latent_size, latent_size)),
-            jnp.ones((n_devices)),
-            jnp.ones((n_devices), dtype=jnp.int32),
-        )
-
-        def create_train_state(x, y, t, model, optimizer):
-            variables = model.init(
-                init_key,
-                x=x,
-                t=t,
-                y=y,
-                rng=init_key,
-                train=True,
-            )
-            train_state = TrainState.create(
-                apply_fn=self.model.apply, params=variables["params"], tx=optimizer
-            )
-            return train_state
 
         logger.info(f"Available devices: {jax.devices()}")
 
@@ -265,82 +255,34 @@ class Trainer:
         self.mesh = Mesh(device_mesh, axis_names=("data", "model"))
         logger.info(f"Mesh: {self.mesh}")
 
-        def get_sharding_for_spec(pspec: PartitionSpec) -> NamedSharding:
-            """
-            Get a NamedSharding for a given PartitionSpec, and the device mesh.
-            A NamedSharding is simply a combination of a PartitionSpec and a Mesh instance.
-            """
-            return NamedSharding(self.mesh, pspec)
-
-        # This shards the first dimension of the input data (batch dim) across the data axis of the mesh.
-        x_sharding = get_sharding_for_spec(PartitionSpec("data"))
-
-        # Returns a pytree of shapes for the train state
-        train_state_sharding_shape = jax.eval_shape(
-            functools.partial(
-                create_train_state, model=self.model, optimizer=self.optimizer
-            ),
-            *input_values,
-        )
-
-        # Get the PartitionSpec for all the variables in the train state
-        train_state_sharding = nn.get_sharding(train_state_sharding_shape, self.mesh)
-        input_sharding: Any = (x_sharding, x_sharding, x_sharding)
+        self.data_sharding = NamedSharding(self.mesh, PartitionSpec("data"))
+        self.key_sharding = NamedSharding(self.mesh, PartitionSpec())
 
         logger.info(f"Initializing model...")
-        # Shard the train_state so so that it's replicated across devices
-        jit_create_train_state_fn = jax.jit(
-            create_train_state,
-            static_argnums=(3, 4),
-            in_shardings=input_sharding,  # type: ignore
-            out_shardings=train_state_sharding,
-        )
-        self.train_state = jit_create_train_state_fn(
-            *input_values, self.model, self.optimizer
-        )
-        total_bytes, total_params = memory_usage_params(self.train_state.params)
+        with self.mesh:
+            self.model = create_sharded_model()
+
+        self.optimizer = nnx.Optimizer(self.model, optax.adam(learning_rate))
+
+        params = nnx.state(self.model, nnx.Param)
+        total_bytes, total_params = memory_usage_params(params)
         logger.info(f"Model parameter count: {total_params} using: {total_bytes}")
 
         logger.info("JIT compiling step functions...")
 
-        step_in_sharding: Any = (
-            train_state_sharding,
-            x_sharding,
-            x_sharding,
-            get_sharding_for_spec(PartitionSpec()),
-        )
-        step_out_sharding: Any = (
-            get_sharding_for_spec(PartitionSpec()),
-            train_state_sharding,
-        )
-        self.train_step: Wrapped = jax.jit(
+        self.train_step = nnx.jit(
             functools.partial(rectified_flow_step, training=True),
-            in_shardings=step_in_sharding,
-            out_shardings=step_out_sharding,
         )
 
-        self.eval_step: Wrapped = jax.jit(
+        self.eval_step = nnx.jit(
             functools.partial(rectified_flow_step, training=False),
-            in_shardings=step_in_sharding,
-            out_shardings=step_out_sharding,
         )
 
-        if profile:
-            logger.info("AOT compiling step functions...")
-            compiled_step: Compiled = self.train_step.lower(
-                self.train_state, *input_values[:2], init_key
-            ).compile()
-            train_cost_analysis: Dict = compiled_step.cost_analysis()[0]  # type: ignore
-            self.flops_for_step = train_cost_analysis.get("flops", 0)
-            logger.info(
-                f"Steps compiled, train cost analysis FLOPs: {self.flops_for_step}"
-            )
-        else:
-            self.flops_for_step = 0
+        self.flops_for_step = 0
 
     def save_checkpoint(self, global_step: int):
-        if self.train_state is not None:
-            self.checkpoint_manager.save(global_step, args=ocp.args.StandardSave(self.train_state))  # type: ignore
+        state = nnx.state(self.model)
+        self.checkpoint_manager.save(global_step, args=ocp.args.StandardSave(state))  # type: ignore
 
 
 def process_batch(
@@ -405,6 +347,8 @@ def run_eval(
         total=num_eval_batches,
         dynamic_ncols=True,
     )
+
+    rng = jax.device_put(rng, trainer.key_sharding)
     for j, eval_batch in enumerate(eval_iter):
         if j >= n_eval_batches:
             break
@@ -418,8 +362,11 @@ def run_eval(
             dataset_config.image_field_name,
             dataset_config.using_latents,
         )
-        eval_loss, trainer.train_state = trainer.eval_step(
-            trainer.train_state, images, labels, rng
+
+        images, labels = jax.device_put((images, labels), trainer.data_sharding)
+
+        eval_loss = trainer.eval_step(
+            trainer.model, trainer.optimizer, images, labels, rng
         )
         iter_description_dict.update({"eval_loss": fmt_float_display(eval_loss)})
         eval_iter.set_postfix(iter_description_dict)
@@ -443,7 +390,7 @@ def run_eval(
             labels = jnp.arange(0, n_labels_to_sample)
             null_cond = jnp.ones_like(labels) * 10
             samples = rectified_flow_sample(
-                trainer.train_state,
+                trainer.model,
                 init_noise,
                 labels,
                 sample_key,
@@ -527,7 +474,11 @@ def main(
                 dataset_config.image_field_name,
                 dataset_config.using_latents,
             )
+
+            images, labels = jax.device_put((images, labels), trainer.data_sharding)
+
             step_key = random.PRNGKey(global_step)
+            step_key = jax.device_put(step_key, trainer.key_sharding)
 
             if profile:
                 # profile_ctx = jax.profiler.trace(
@@ -539,10 +490,9 @@ def main(
 
             with profile_ctx:
                 step_start_time = time.perf_counter()
-                train_loss, updated_state = trainer.train_step(
-                    trainer.train_state, images, labels, step_key
+                train_loss = trainer.train_step(
+                    trainer.model, trainer.optimizer, images, labels, step_key
                 )
-                trainer.train_state = updated_state
 
                 step_duration = time.perf_counter() - step_start_time
                 flops_device_sec = trainer.flops_for_step / (
