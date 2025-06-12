@@ -63,7 +63,7 @@ def trace_module_calls(module: module_lib.Module, *args, **kwargs) -> List[Modul
 
 def memory_usage_params(model_params):
     total_bytes, total_params = 0, 0
-    for param in jax.tree_leaves(model_params):
+    for param in jax.tree.leaves(model_params):
         total_bytes += param.size * param.dtype.itemsize
         total_params += param.size
     total_bytes = _bytes_repr(total_bytes)
