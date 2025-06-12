@@ -95,8 +95,24 @@ class DatasetConfig:
 
     model_config: ModelConfig = field(default_factory=lambda: DIT_MODELS["B_2"])
 
+    using_latents: bool = False
+
 
 DATASET_CONFIGS = {
+    "imagenet_vae": DatasetConfig(
+        hf_dataset_uri="vae_mds",
+        n_classes=1000,
+        latent_size=32,
+        n_channels=4,
+        dataset_length=1281167,
+        label_names=list(IMAGENET_LABELS_NAMES.values()),
+        image_field_name="vae_output",
+        label_field_name="label_as_text",
+        n_labels_to_sample=10,
+        eval_split_name="val",
+        batch_size=160 * 4,
+        model_config=DIT_MODELS["XL_2"],
+    ),
     # https://huggingface.co/datasets/zh-plus/tiny-imagenet
     "imagenet": DatasetConfig(
         hf_dataset_uri="evanarlian/imagenet_1k_resized_256",
@@ -109,7 +125,7 @@ DATASET_CONFIGS = {
         label_field_name="label",
         n_labels_to_sample=10,
         eval_split_name="val",
-        batch_size=128 * 8,
+        batch_size=154 * 4,
         model_config=DIT_MODELS["XL_2"],
     ),
     # https://huggingface.co/datasets/cifar10
@@ -191,7 +207,7 @@ class Trainer:
         )
         init_key, self.train_key = random.split(rng, 2)
         latent_size, n_channels = dataset_config.latent_size, dataset_config.n_channels
-        dtype = jnp.float16 if half_precision else jnp.float32
+        dtype = jnp.bfloat16 if half_precision else jnp.float32
 
         self.model = DiTModel(
             dim=dataset_config.model_config.dim,
@@ -398,6 +414,7 @@ def run_eval(
             dataset_config.n_channels,
             dataset_config.label_field_name,
             dataset_config.image_field_name,
+            dataset_config.using_latents,
         )
         eval_loss, trainer.train_state = trainer.eval_step(
             trainer.train_state, images, labels, rng
@@ -506,6 +523,7 @@ def main(
                 dataset_config.n_channels,
                 dataset_config.label_field_name,
                 dataset_config.image_field_name,
+                dataset_config.using_latents,
             )
             step_key = random.PRNGKey(global_step)
 
