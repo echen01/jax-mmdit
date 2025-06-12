@@ -3,7 +3,7 @@ from loguru import logger
 import os
 import time
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, List, Optional, Tuple, cast, Dict
 
 import fire
@@ -93,7 +93,7 @@ class DatasetConfig:
     # used for streaming datasets
     dataset_length: Optional[int] = None
 
-    model_config: ModelConfig = DIT_MODELS["B_2"]
+    model_config: ModelConfig = field(default_factory=lambda: DIT_MODELS["B_2"])
 
 
 DATASET_CONFIGS = {
@@ -102,14 +102,14 @@ DATASET_CONFIGS = {
         hf_dataset_uri="evanarlian/imagenet_1k_resized_256",
         n_classes=1000,
         latent_size=32,
-        n_channels=4,
+        n_channels=3,
         dataset_length=1281167,
         label_names=list(IMAGENET_LABELS_NAMES.values()),
         image_field_name="image",
         label_field_name="label",
         n_labels_to_sample=10,
         eval_split_name="val",
-        batch_size=256,
+        batch_size=128 * 8,
         model_config=DIT_MODELS["XL_2"],
     ),
     # https://huggingface.co/datasets/cifar10
@@ -289,7 +289,7 @@ class Trainer:
             train_state_sharding,
             x_sharding,
             x_sharding,
-            x_sharding,
+            get_sharding_for_spec(PartitionSpec()),
         )
         step_out_sharding: Any = (
             get_sharding_for_spec(PartitionSpec()),
