@@ -1,9 +1,6 @@
 import jax
 import flax.linen.module as module_lib
-from flax.linen.summary import (
-    _get_call_flops,
-    _bytes_repr
-)
+from flax.linen.summary import _get_call_flops, _bytes_repr
 from typing import Tuple, List
 from dataclasses import dataclass
 from flax.linen import Conv
@@ -21,7 +18,11 @@ DEVICE_PEAK_FLOPS = {
     "NVIDIA H100 80GB HBM3": {
         "fp32": 5.1e13,
         "fp16": 1.513e15,
-    }
+    },
+    "TPU v5": {
+        "fp32": 100e12,  # Random number
+        "fp16": 459e12,
+    },
 }
 
 
