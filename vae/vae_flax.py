@@ -650,10 +650,11 @@ class FlaxAutoencoderKL(nn.Module):
 
 def load_pretrained_vae(
     hf_model_id: str,
-    flax: bool = False
+    flax: bool = False, 
+    subfolder: Optional[str] = None,
 ) -> Tuple[FlaxAutoencoderKL, Any]:
     folder_path = snapshot_download(hf_model_id)
-
+    folder_path = os.path.join(folder_path, subfolder) if subfolder else folder_path
     config_json: Dict = json.load(open(os.path.join(folder_path, CONFIG_NAME), "r"))
     config_fields = set([field.name for field in dataclasses.fields(AutoencoderConfig)])
     for key in list(config_json.keys()):
