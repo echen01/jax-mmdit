@@ -3,7 +3,7 @@ from jax import Array, lax
 import jax.numpy as jnp
 from flax import nnx
 import jax
-from jax.nn import initializers, swish
+from jax.nn import initializers
 from typing import Optional
 from flax.nnx import LayerNorm, dot_product_attention
 from jax.lax import Precision
@@ -242,7 +242,7 @@ class FeedForward(nnx.Module):
         x1 = self.in_layer(x)
         x3 = self.out_layer(x)
         # NOTE: mmdit uses SiLU, but this is equivalent
-        return self.mid_layer(swish(x1) * x3)
+        return self.mid_layer(nnx.silu(x1) * x3)
 
 
 def modulate(x, shift, scale):
@@ -286,9 +286,9 @@ class TransformerBlock(nnx.Module):
         self.ffn_norm = nnx.LayerNorm(dim, epsilon=norm_eps, dtype=dtype, rngs=rngs)
 
         self.adaLN_modulation = nnx.Sequential(
-            swish,
+            nnx.silu,
             nnx.Linear(
-                dim,
+                min(dim, 1024),
                 6 * dim,
                 kernel_init=nnx.initializers.xavier_uniform(),
                 rngs=rngs,
@@ -353,7 +353,7 @@ class FinalLayer(nnx.Module):
 
         self.adaLN_modulation = nnx.Sequential(
             nnx.Linear(min(dim, 1024), min(dim, 1024), use_bias=True, rngs=rngs),
-            swish,
+            nnx.silu,
             nnx.Linear(min(dim, 1024), 2 * dim, use_bias=True, rngs=rngs),
         )
 
@@ -397,7 +397,7 @@ class DiTModel(nnx.Module):
                 strides=(1, 1),
                 rngs=rngs,
             ),
-            swish,
+            nnx.silu,
             nnx.GroupNorm(dim // 2, num_groups=32, rngs=rngs),
             nnx.Conv(
                 dim // 2,
@@ -407,7 +407,7 @@ class DiTModel(nnx.Module):
                 strides=(1, 1),
                 rngs=rngs,
             ),
-            swish,
+            nnx.silu,
             nnx.GroupNorm(dim // 2, num_groups=32, rngs=rngs),
         )
 
