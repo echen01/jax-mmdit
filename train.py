@@ -563,11 +563,8 @@ def main(
             train_iter.set_postfix(iter_description_dict)
 
             if global_step % eval_save_steps == 0 or profile:
+                # trainer.save_checkpoint(global_step)
 
-                trainer.save_checkpoint(global_step)
-                jax.experimental.multihost_utils.sync_global_devices(
-                    "after_checkpoint_save"
-                )
                 run_eval(
                     eval_dataset,
                     n_eval_batches,
@@ -586,12 +583,8 @@ def main(
                 return
 
         if epoch % sample_every_n == 0 and not profile:
+            # trainer.save_checkpoint(global_step)
 
-            trainer.save_checkpoint(global_step)
-
-            jax.experimental.multihost_utils.sync_global_devices(
-                "after_checkpoint_save"
-            )
             run_eval(
                 eval_dataset,
                 n_eval_batches,
