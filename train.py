@@ -41,7 +41,7 @@ jax.experimental.compilation_cache.compilation_cache.set_cache_dir("jit_cache")
 
 
 print("JAX devices: ", jax.devices())
-logger.info(f"JAX core count: {jax.device_count()}")
+logger.info(f"JAX device count: {jax.device_count()}")
 
 
 def fmt_float_display(val: Array | float | int) -> str:
@@ -385,7 +385,7 @@ def run_eval(
     """
     num_eval_batches = 1
     eval_iter = tqdm(
-        eval_dataset.iter(batch_size=32, drop_last_batch=True),
+        eval_dataset.iter(batch_size=max(jax.device_count(), 16), drop_last_batch=True),
         leave=False,
         total=num_eval_batches,
         dynamic_ncols=True,
@@ -405,7 +405,7 @@ def run_eval(
             dataset_config.using_latents,
         )
 
-        images, labels = jax.device_put((images, labels), trainer.data_sharding)
+        # images, labels = jax.device_put((images, labels), trainer.data_sharding)
 
         rng = random.PRNGKey(0)
         rng = jax.device_put(rng, trainer.key_sharding)
