@@ -110,13 +110,12 @@ DATASET_CONFIGS = {
         n_classes=1000,
         latent_size=32,
         n_channels=4,
-        dataset_length=1281167,
         label_names=list(IMAGENET_LABELS_NAMES.values()),
         image_field_name="vae_output",
         label_field_name="label",
         n_labels_to_sample=10,
         eval_split_name=None,
-        batch_size=int(36 * jax.process_count()),
+        batch_size=288,
         model_config=DIT_MODELS["XL_2"],
         using_latents=True,
     ),
@@ -489,7 +488,7 @@ def main(
 
     iter_description_dict = {"loss": 0.0, "eval_loss": 0.0, "epoch": 0, "step": 0}
 
-    n_samples = dataset_config.dataset_length or len(train_dataset)
+    n_samples = len(train_dataset)
 
     n_evals = 0
     for epoch in range(n_epochs):
