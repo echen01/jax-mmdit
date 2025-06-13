@@ -503,7 +503,7 @@ def main(
         n_batches = n_samples // dataset_config.batch_size
         train_iter = tqdm(
             train_dataset.iter(
-                batch_size=dataset_config.batch_size // 8, drop_last_batch=True
+                batch_size=dataset_config.batch_size, drop_last_batch=True
             ),
             total=n_batches,
             leave=False,
@@ -524,7 +524,6 @@ def main(
                 dataset_config.using_latents,
             )
 
-            # Add this before device_put to debug
             logger.info(
                 f"Host {jax.process_index()}: images.shape={images.shape}, labels.shape={labels.shape}"
             )
