@@ -20,7 +20,6 @@ from flax import nnx
 from jax import random
 from jax.experimental import mesh_utils
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
-from jax.stages import Compiled, Wrapped
 from PIL import Image
 from tensorboardX import SummaryWriter
 from tqdm import tqdm
@@ -31,6 +30,8 @@ from sampling import rectified_flow_sample, rectified_flow_step
 from utils import center_crop, ensure_directory, image_grid, normalize_images
 from profiling import memory_usage_params, trace_module_calls, get_peak_flops
 from jax import Array
+
+from vae.vae_flax import load_pretrained_vae
 
 jax.experimental.compilation_cache.compilation_cache.set_cache_dir("jit_cache")
 
@@ -100,18 +101,19 @@ class DatasetConfig:
 
 DATASET_CONFIGS = {
     "imagenet_vae": DatasetConfig(
-        hf_dataset_uri="vae_mds",
+        hf_dataset_uri="emc348/imagenet-sdxl-vae-uint8",
         n_classes=1000,
         latent_size=32,
         n_channels=4,
         dataset_length=1281167,
         label_names=list(IMAGENET_LABELS_NAMES.values()),
         image_field_name="vae_output",
-        label_field_name="label_as_text",
+        label_field_name="label",
         n_labels_to_sample=10,
-        eval_split_name="val",
-        batch_size=160 * 4,
-        model_config=DIT_MODELS["XL_2"],
+        eval_split_name=None,
+        batch_size=32,
+        model_config=DIT_MODELS["B_2"],
+        using_latents=True,
     ),
     # https://huggingface.co/datasets/zh-plus/tiny-imagenet
     "imagenet": DatasetConfig(
@@ -163,7 +165,7 @@ DATASET_CONFIGS = {
         n_channels=1,
         n_classes=10,
         latent_size=28,
-        batch_size=128,  # 796 * 4,
+        batch_size=796 * 4,
         eval_split_name="test",
         dataset_length=60000,
     ),
@@ -280,9 +282,16 @@ class Trainer:
 
         self.flops_for_step = 0
 
+        if dataset_config.using_latents:
+            logger.info("Loading VAE...")
+            self.setup_vae()
+
     def save_checkpoint(self, global_step: int):
         state = nnx.state(self.model)
         self.checkpoint_manager.save(global_step, args=ocp.args.StandardSave(state))  # type: ignore
+
+    def setup_vae(self, vae_path: str = "pcuenq/stable-diffusion-xl-base-1.0-flax"):
+        self.vae, self.vae_params = load_pretrained_vae(vae_path, True, subfolder="vae")
 
 
 def process_batch(
@@ -319,6 +328,7 @@ def process_batch(
         image_jnp = normalize_images(image_jnp)
     else:
         image_jnp = image_jnp / 255 - 0.5
+        image_jnp = image_jnp * 24
     label = jnp.asarray(batch[label_field_name], dtype=jnp.float32)
     if label.ndim == 2:
         label = label[:, 0]
@@ -394,6 +404,11 @@ def run_eval(
                 init_noise,
                 labels,
                 sample_key,
+                decoder=(
+                    (trainer.vae, trainer.vae_params)
+                    if dataset_config.using_latents
+                    else None
+                ),
                 null_cond=null_cond,
                 sample_steps=50,
             )
@@ -430,10 +445,10 @@ def main(
     assert dataset_name in DATASET_CONFIGS, f"Invalid dataset name: {dataset_name}"
 
     dataset_config = DATASET_CONFIGS[dataset_name]
-    dataset: DatasetDict = load_dataset(dataset_config.hf_dataset_uri, streaming=True)  # type: ignore
+    dataset: DatasetDict = load_dataset(dataset_config.hf_dataset_uri, streaming=not dataset_config.using_latents)  # type: ignore
     if not dataset_config.eval_split_name:
         dataset_config.eval_split_name = "test"
-        dataset: DatasetDict = dataset["train"].train_test_split(test_size=0.1)
+        dataset = dataset["train"].train_test_split(test_size=0.1)
     train_dataset = dataset[dataset_config.train_split_name]
     eval_dataset = dataset[dataset_config.eval_split_name]
 

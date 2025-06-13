@@ -1,7 +1,7 @@
 import jax
 from jax import Array, random
 import jax.numpy as jnp
-from typing import List, Tuple, Optional, Dict, TypedDict
+from typing import List, Tuple, Optional, Dict, TypedDict, Callable
 from flax import nnx
 from model import DiTModel
 from dataclasses import dataclass
@@ -154,6 +154,7 @@ def rectified_flow_sample(
     z: Array,
     cond: Array,
     rng_key: Array,
+    decoder=None,
     null_cond=None,
     sample_steps: int = 30,
     cfg: float = 2.0,
@@ -170,7 +171,18 @@ def rectified_flow_sample(
         outs.append(z)
         z = sample_loop(z, t, cond, model, cfg, null_cond, dt, rng_key)
 
+    if decoder is not None:
+        vae, vae_params = decoder
+
+        @jax.jit
+        def vae_decode(sample: Array) -> Array:
+            return vae.apply(vae_params, sample, method="decode")  # type: ignore
+
+        for i in range(len(outs)):
+            outs[i] = vae_decode(outs[i])
+
     images = jnp.stack(outs, axis=0)
+
     images = images.transpose((0, 1, 3, 4, 2))
     images = denormalize_images(images)
     img_mode = "L" if images.shape[-1] == 1 else "RGB"
