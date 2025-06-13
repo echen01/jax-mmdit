@@ -33,9 +33,10 @@ from jax import Array
 
 from vae.vae_flax import load_pretrained_vae
 
+jax.distributed.initialize()
+
 jax.experimental.compilation_cache.compilation_cache.set_cache_dir("jit_cache")
 
-jax.distributed.initialize()
 if jax.process_index() == 0:
     print("JAX devices: ", jax.devices())
     logger.info(f"JAX host count: {jax.device_count()}")
