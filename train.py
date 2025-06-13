@@ -397,7 +397,7 @@ def run_eval(
             break
 
         # Eval loss
-        images, labels = process_batch(
+        images, labels = process_batch_multihost(
             eval_batch,
             dataset_config.latent_size,
             dataset_config.n_channels,
