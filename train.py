@@ -115,8 +115,8 @@ DATASET_CONFIGS = {
         label_field_name="label",
         n_labels_to_sample=10,
         eval_split_name=None,
-        batch_size=8 * 16,
-        model_config=DIT_MODELS["L_2"],
+        batch_size=64,
+        model_config=DIT_MODELS["XL_2"],
         using_latents=True,
     ),
     # https://huggingface.co/datasets/zh-plus/tiny-imagenet
@@ -294,8 +294,9 @@ class Trainer:
             self.setup_vae()
 
     def save_checkpoint(self, global_step: int):
-        state = nnx.state(self.model)
-        self.checkpoint_manager.save(global_step, args=ocp.args.StandardSave(state))  # type: ignore
+        if jax.process_index() == 0:
+            state = nnx.state(self.model)
+            self.checkpoint_manager.save(global_step, args=ocp.args.StandardSave(state))  # type: ignore
 
     def setup_vae(self, vae_path: str = "pcuenq/stable-diffusion-xl-base-1.0-flax"):
         self.vae, self.vae_params = load_pretrained_vae(vae_path, True, subfolder="vae")
