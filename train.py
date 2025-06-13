@@ -115,8 +115,8 @@ DATASET_CONFIGS = {
         label_field_name="label",
         n_labels_to_sample=10,
         eval_split_name=None,
-        batch_size=4 * 16,
-        model_config=DIT_MODELS["XL_2"],
+        batch_size=8 * 16,
+        model_config=DIT_MODELS["L_2"],
         using_latents=True,
     ),
     # https://huggingface.co/datasets/zh-plus/tiny-imagenet
