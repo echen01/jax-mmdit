@@ -391,7 +391,6 @@ def run_eval(
         dynamic_ncols=True,
     )
 
-    rng = jax.device_put(rng, trainer.key_sharding)
     for j, eval_batch in enumerate(eval_iter):
         if j >= n_eval_batches:
             break
@@ -408,8 +407,12 @@ def run_eval(
 
         images, labels = jax.device_put((images, labels), trainer.data_sharding)
 
+        rng = random.PRNGKey(0)
+        rng = jax.device_put(rng, trainer.key_sharding)
+        eval_rng, sample_rng = random.split(rng)
+
         eval_loss = trainer.eval_step(
-            trainer.model, trainer.optimizer, images, labels, rng
+            trainer.model, trainer.optimizer, images, labels, eval_rng
         )
         iter_description_dict.update({"eval_loss": fmt_float_display(eval_loss)})
         eval_iter.set_postfix(iter_description_dict)
@@ -429,7 +432,7 @@ def run_eval(
                 dataset_config.latent_size,
                 dataset_config.latent_size,
             )
-            init_noise = random.normal(rng, noise_shape)
+            init_noise = random.normal(sample_rng, noise_shape)
             labels = jnp.arange(0, n_labels_to_sample)
             null_cond = jnp.ones_like(labels) * 10
             samples = rectified_flow_sample(
