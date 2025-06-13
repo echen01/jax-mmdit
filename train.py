@@ -35,9 +35,10 @@ from vae.vae_flax import load_pretrained_vae
 
 jax.experimental.compilation_cache.compilation_cache.set_cache_dir("jit_cache")
 
-
-print("JAX devices: ", jax.devices())
-logger.info(f"JAX host count: {jax.device_count()}")
+jax.distributed.initialize()
+if jax.process_index() == 0:
+    print("JAX devices: ", jax.devices())
+    logger.info(f"JAX host count: {jax.device_count()}")
 
 
 def fmt_float_display(val: Array | float | int) -> str:
@@ -235,13 +236,15 @@ class Trainer:
             return model
 
         n_devices = len(jax.devices())
-
-        logger.info(f"Available devices: {jax.devices()}")
+        if jax.process_index() == 0:
+            logger.info(f"Available devices: {jax.devices()}")
 
         # Create a device mesh according to the physical layout of the devices.
         # device_mesh is just an ndarray
         device_mesh = mesh_utils.create_device_mesh((n_devices, 1))
-        logger.info(f"Device mesh: {device_mesh}")
+
+        if jax.process_index() == 0:
+            logger.info(f"Device mesh: {device_mesh}")
 
         # Async checkpointer for saving checkpoints across processes
         base_dir_abs = os.getcwd()
@@ -255,12 +258,14 @@ class Trainer:
         # so that sharding a tensor along the axes shards according to the corresponding device_mesh layout.
         # i.e. with device layout of (8, 1), data would be replicated to all devices, and model would be replicated to 1 device.
         self.mesh = Mesh(device_mesh, axis_names=("data", "model"))
-        logger.info(f"Mesh: {self.mesh}")
+
+        if jax.process_index() == 0:
+            logger.info(f"Mesh: {self.mesh}")
+            logger.info(f"Initializing model...")
 
         self.data_sharding = NamedSharding(self.mesh, PartitionSpec("data"))
         self.key_sharding = NamedSharding(self.mesh, PartitionSpec())
 
-        logger.info(f"Initializing model...")
         with self.mesh:
             self.model = create_sharded_model()
 
@@ -268,9 +273,10 @@ class Trainer:
 
         params = nnx.state(self.model, nnx.Param)
         total_bytes, total_params = memory_usage_params(params)
-        logger.info(f"Model parameter count: {total_params} using: {total_bytes}")
 
-        logger.info("JIT compiling step functions...")
+        if jax.process_index() == 0:
+            logger.info(f"Model parameter count: {total_params} using: {total_bytes}")
+            logger.info("JIT compiling step functions...")
 
         self.train_step = nnx.jit(
             functools.partial(rectified_flow_step, training=True),
@@ -283,7 +289,8 @@ class Trainer:
         self.flops_for_step = 0
 
         if dataset_config.using_latents:
-            logger.info("Loading VAE...")
+            if jax.process_index() == 0:
+                logger.info("Loading VAE...")
             self.setup_vae()
 
     def save_checkpoint(self, global_step: int):
