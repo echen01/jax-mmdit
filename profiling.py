@@ -24,8 +24,12 @@ DEVICE_PEAK_FLOPS = {
         "fp16": 459e12,
     },
     "TPU v5 lite": {
-	"fp32": 100e12, # Random number
-	"fp16": 197e12,
+        "fp32": 100e12,  # Random number
+        "fp16": 197e12,
+    },
+    "TPU v6 lite": {
+        "fp32": 300e12,  # Random number
+        "fp16": 918e12,
     },
 }
 
