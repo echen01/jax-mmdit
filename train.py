@@ -16,6 +16,7 @@ import jax.numpy as jnp
 import optax
 import orbax.checkpoint as ocp
 from chex import PRNGKey
+from datasets import concatenate_datasets
 from datasets.arrow_dataset import Dataset
 from datasets.dataset_dict import DatasetDict
 from datasets.load import load_dataset
@@ -115,7 +116,7 @@ DATASET_CONFIGS = {
         label_field_name="label",
         n_labels_to_sample=10,
         eval_split_name=None,
-        batch_size=32,
+        batch_size=int(64 * jax.process_count()),
         model_config=DIT_MODELS["XL_2"],
         using_latents=True,
     ),
@@ -364,6 +365,7 @@ def run_eval(
         leave=False,
         total=num_eval_batches,
         dynamic_ncols=True,
+        disable=jax.process_index() != 0,
     )
 
     for j, eval_batch in enumerate(eval_iter):
@@ -434,7 +436,7 @@ def run_eval(
 def main(
     n_epochs: int = 100,
     learning_rate: float = 1e-4,
-    eval_save_steps: int = 250,
+    eval_save_steps: int = 500,
     n_eval_batches: int = 1,
     sample_every_n: int = 1,
     dataset_name: str = "imagenet",
@@ -462,7 +464,11 @@ def main(
     dataset: DatasetDict = load_dataset(dataset_config.hf_dataset_uri, streaming=False)  # type: ignore
     if not dataset_config.eval_split_name:
         dataset_config.eval_split_name = "test"
-        dataset = dataset["train"].train_test_split(test_size=0.1)
+        if dataset_config.using_latents:
+            dataset = concatenate_datasets([dataset[f"train_{i}"] for i in range(3)])  # type: ignore
+            dataset = dataset.train_test_split(test_size=0.1)  # type: ignore
+        else:
+            dataset = dataset["train"].train_test_split(test_size=0.1)
     train_dataset = dataset[dataset_config.train_split_name]
     eval_dataset = dataset[dataset_config.eval_split_name]
 
@@ -496,6 +502,7 @@ def main(
             total=n_batches,
             leave=False,
             dynamic_ncols=True,
+            disable=jax.process_index() != 0,
         )
         for i, batch in enumerate(train_iter):
 
