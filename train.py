@@ -39,9 +39,9 @@ from vae.vae_flax import load_pretrained_vae
 
 jax.experimental.compilation_cache.compilation_cache.set_cache_dir("jit_cache")
 
-if jax.process_index() == 0:
-    print("JAX devices: ", jax.devices())
-    logger.info(f"JAX host count: {jax.device_count()}")
+
+print("JAX devices: ", jax.devices())
+logger.info(f"JAX core count: {jax.device_count()}")
 
 
 def fmt_float_display(val: Array | float | int) -> str:
@@ -115,7 +115,7 @@ DATASET_CONFIGS = {
         label_field_name="label",
         n_labels_to_sample=10,
         eval_split_name=None,
-        batch_size=32,
+        batch_size=32 * 32,
         model_config=DIT_MODELS["B_2"],
         using_latents=True,
     ),
