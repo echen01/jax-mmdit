@@ -391,12 +391,13 @@ def run_eval(
         dynamic_ncols=True,
     )
 
-    for j, eval_batch in enumerate(eval_iter):
+    for j, raw_eval_batch in enumerate(eval_iter):
         if j >= n_eval_batches:
             break
 
+        eval_batch = multihost_utils.broadcast_one_to_all(raw_eval_batch)
         # Eval loss
-        images, labels = process_batch_multihost(
+        images, labels = process_batch(
             eval_batch,
             dataset_config.latent_size,
             dataset_config.n_channels,
