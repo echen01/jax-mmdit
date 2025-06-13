@@ -506,7 +506,10 @@ def main(
         )
         for i, batch in enumerate(train_iter):
 
-            global_step = epoch * (n_samples // dataset_config.batch_size) + i
+            global_step = (
+                epoch * (n_samples // dataset_config.batch_size // jax.process_count())
+                + i
+            )
 
             # Train step
             images, labels = process_batch(
