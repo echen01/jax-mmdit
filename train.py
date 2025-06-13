@@ -416,7 +416,7 @@ def run_eval(
         summary_writer.add_scalar("eval_loss", eval_loss, global_step)
 
         # Sampling
-        if do_sample and jax.process_index() == 6:
+        if do_sample:
             sample_key, rng = random.split(rng)
             n_labels_to_sample = (
                 dataset_config.n_labels_to_sample
