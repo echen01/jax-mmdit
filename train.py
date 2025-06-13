@@ -486,14 +486,16 @@ def main(
             global_step = epoch * (n_samples // dataset_config.batch_size) + i
 
             # Train step
-            images, labels = process_batch(
-                batch,
-                dataset_config.latent_size,
-                dataset_config.n_channels,
-                dataset_config.label_field_name,
-                dataset_config.image_field_name,
-                dataset_config.using_latents,
-            )
+
+            if jax.process_index() == 0:
+                images, labels = process_batch(
+                    batch,
+                    dataset_config.latent_size,
+                    dataset_config.n_channels,
+                    dataset_config.label_field_name,
+                    dataset_config.image_field_name,
+                    dataset_config.using_latents,
+                )
 
             # Add this before device_put to debug
             logger.info(
