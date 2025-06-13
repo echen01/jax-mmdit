@@ -16,6 +16,7 @@ import jax.numpy as jnp
 import optax
 import orbax.checkpoint as ocp
 from chex import PRNGKey
+from datasets import concatenate_datasets
 from datasets.arrow_dataset import Dataset
 from datasets.dataset_dict import DatasetDict
 from datasets.load import load_dataset
@@ -109,13 +110,12 @@ DATASET_CONFIGS = {
         n_classes=1000,
         latent_size=32,
         n_channels=4,
-        dataset_length=1281167,
         label_names=list(IMAGENET_LABELS_NAMES.values()),
         image_field_name="vae_output",
         label_field_name="label",
         n_labels_to_sample=10,
         eval_split_name=None,
-        batch_size=32,
+        batch_size=288,
         model_config=DIT_MODELS["XL_2"],
         using_latents=True,
     ),
@@ -364,6 +364,7 @@ def run_eval(
         leave=False,
         total=num_eval_batches,
         dynamic_ncols=True,
+        disable=jax.process_index() != 0,
     )
 
     for j, eval_batch in enumerate(eval_iter):
@@ -434,7 +435,7 @@ def run_eval(
 def main(
     n_epochs: int = 100,
     learning_rate: float = 1e-4,
-    eval_save_steps: int = 250,
+    eval_save_steps: int = 500,
     n_eval_batches: int = 1,
     sample_every_n: int = 1,
     dataset_name: str = "imagenet",
@@ -462,7 +463,11 @@ def main(
     dataset: DatasetDict = load_dataset(dataset_config.hf_dataset_uri, streaming=False)  # type: ignore
     if not dataset_config.eval_split_name:
         dataset_config.eval_split_name = "test"
-        dataset = dataset["train"].train_test_split(test_size=0.1)
+        if dataset_config.using_latents:
+            dataset = concatenate_datasets([dataset[f"train_{i}"] for i in range(3)])  # type: ignore
+            dataset = dataset.train_test_split(test_size=0.1)  # type: ignore
+        else:
+            dataset = dataset["train"].train_test_split(test_size=0.1)
     train_dataset = dataset[dataset_config.train_split_name]
     eval_dataset = dataset[dataset_config.eval_split_name]
 
@@ -483,12 +488,12 @@ def main(
 
     iter_description_dict = {"loss": 0.0, "eval_loss": 0.0, "epoch": 0, "step": 0}
 
-    n_samples = dataset_config.dataset_length or len(train_dataset)
+    n_samples = len(train_dataset)
 
     n_evals = 0
     for epoch in range(n_epochs):
         iter_description_dict.update({"epoch": epoch})
-        n_batches = n_samples // dataset_config.batch_size // jax.process_count()
+        n_batches = n_samples // dataset_config.batch_size
         train_iter = tqdm(
             train_dataset.iter(
                 batch_size=dataset_config.batch_size, drop_last_batch=True
@@ -496,10 +501,11 @@ def main(
             total=n_batches,
             leave=False,
             dynamic_ncols=True,
+            disable=jax.process_index() != 0,
         )
         for i, batch in enumerate(train_iter):
 
-            global_step = epoch * (n_samples // dataset_config.batch_size) + i
+            global_step = epoch * n_batches + i
 
             # Train step
             images, labels = process_batch(
