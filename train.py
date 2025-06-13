@@ -39,9 +39,9 @@ from vae.vae_flax import load_pretrained_vae
 
 jax.experimental.compilation_cache.compilation_cache.set_cache_dir("jit_cache")
 
-
-print("JAX devices: ", jax.devices())
-logger.info(f"JAX device count: {jax.device_count()}")
+if jax.process_index() == 0:
+    logger.info("JAX host count: ", jax.process_count())
+    logger.info(f"JAX device count: {jax.device_count()}")
 
 
 def fmt_float_display(val: Array | float | int) -> str:
@@ -115,8 +115,8 @@ DATASET_CONFIGS = {
         label_field_name="label",
         n_labels_to_sample=10,
         eval_split_name=None,
-        batch_size=32,
-        model_config=DIT_MODELS["B_2"],
+        batch_size=8 * 16,
+        model_config=DIT_MODELS["XL_2"],
         using_latents=True,
     ),
     # https://huggingface.co/datasets/zh-plus/tiny-imagenet
@@ -169,7 +169,7 @@ DATASET_CONFIGS = {
         n_channels=1,
         n_classes=10,
         latent_size=28,
-        batch_size=796 * 4,
+        batch_size=128,  # 796 * 4,
         eval_split_name="test",
         dataset_length=60000,
     ),
@@ -244,8 +244,8 @@ class Trainer:
         # Create a device mesh according to the physical layout of the devices.
         # device_mesh is just an ndarray
         device_mesh = mesh_utils.create_device_mesh((n_devices, 1))
-
-        logger.info(f"Device mesh: {device_mesh}")
+        if jax.process_index() == 0:
+            logger.info(f"Device mesh: {device_mesh}")
 
         # Async checkpointer for saving checkpoints across processes
         base_dir_abs = os.getcwd()
@@ -259,9 +259,9 @@ class Trainer:
         # so that sharding a tensor along the axes shards according to the corresponding device_mesh layout.
         # i.e. with device layout of (8, 1), data would be replicated to all devices, and model would be replicated to 1 device.
         self.mesh = Mesh(device_mesh, axis_names=("data", "model"))
-
-        logger.info(f"Mesh: {self.mesh}")
-        logger.info(f"Initializing model...")
+        if jax.process_index() == 0:
+            logger.info(f"Mesh: {self.mesh}")
+            logger.info(f"Initializing model...")
 
         self.data_sharding = NamedSharding(self.mesh, PartitionSpec("data"))
         self.key_sharding = NamedSharding(self.mesh, PartitionSpec())
@@ -274,8 +274,9 @@ class Trainer:
         params = nnx.state(self.model, nnx.Param)
         total_bytes, total_params = memory_usage_params(params)
 
-        logger.info(f"Model parameter count: {total_params} using: {total_bytes}")
-        logger.info("JIT compiling step functions...")
+        if jax.process_index() == 0:
+            logger.info(f"Model parameter count: {total_params} using: {total_bytes}")
+            logger.info("JIT compiling step functions...")
 
         self.train_step = nnx.jit(
             functools.partial(rectified_flow_step, training=True),
@@ -339,34 +340,6 @@ def process_batch(
     return image_jnp, label
 
 
-from jax.experimental import multihost_utils
-
-
-def process_batch_multihost(
-    batch: Any,
-    latent_size: int,
-    n_channels: int,
-    label_field_name: str,
-    image_field_name: str,
-    using_latents: bool = False,
-) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    # Process batch as before
-    images, labels = process_batch(
-        batch,
-        latent_size,
-        n_channels,
-        label_field_name,
-        image_field_name,
-        using_latents,
-    )
-
-    # Ensure all hosts have the same data
-    images = multihost_utils.broadcast_one_to_all(images)
-    labels = multihost_utils.broadcast_one_to_all(labels)
-
-    return images, labels
-
-
 def run_eval(
     eval_dataset: Dataset,
     n_eval_batches: int,
@@ -388,6 +361,7 @@ def run_eval(
         leave=False,
         total=num_eval_batches,
         dynamic_ncols=True,
+        disable=jax.process_index() != 0,
     )
 
     for j, eval_batch in enumerate(eval_iter):
@@ -520,6 +494,7 @@ def main(
             total=n_batches,
             leave=False,
             dynamic_ncols=True,
+            disable=jax.process_index() != 0,
         )
         for i, batch in enumerate(train_iter):
 
