@@ -494,7 +494,7 @@ def main(
     n_evals = 0
     for epoch in range(n_epochs):
         iter_description_dict.update({"epoch": epoch})
-        n_batches = n_samples // dataset_config.batch_size // jax.process_count()
+        n_batches = n_samples // dataset_config.batch_size
         train_iter = tqdm(
             train_dataset.iter(
                 batch_size=dataset_config.batch_size, drop_last_batch=True
@@ -506,10 +506,7 @@ def main(
         )
         for i, batch in enumerate(train_iter):
 
-            global_step = (
-                epoch * (n_samples // dataset_config.batch_size // jax.process_count())
-                + i
-            )
+            global_step = epoch * n_batches + i
 
             # Train step
             images, labels = process_batch(
