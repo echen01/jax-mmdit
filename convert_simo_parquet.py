@@ -46,30 +46,28 @@ dataset = StreamingDataset(
 train_dataset: Dataset = Dataset.from_dict({"label": [], "vae_output": []})
 train_dataset.set_format(type="numpy")
 new_rows = []
-
+count = 0
 for i, sample in enumerate(dataset):
 
-    try:
-        new_sample = {
-            "label": int(sample["label"]),
-            "vae_output": sample["vae_output"],
-        }
-        new_rows.append(new_sample)
-        if new_sample["label"] >= 1000 or new_sample["vae_output"].max() > 255:
-            print(i, sample)
+    new_sample = {
+        "label": int(sample["label"]),
+        "vae_output": sample["vae_output"],
+    }
+    new_rows.append(new_sample)
 
-        if i % 500000 == 0 and i > 0:
-            logger.info(f"Uploading at iteration {i}...")
-            dataset_new_rows = Dataset.from_list(new_rows)
-            concat_dataset = concatenate_datasets([train_dataset, dataset_new_rows])
+    # 524300
+    if i % 500000 == 0 and i > 0:
+        logger.info(f"Uploading at iteration {i}...")
+        dataset_new_rows = Dataset.from_list(new_rows)
+        # concat_dataset = concatenate_datasets([train_dataset, dataset_new_rows])
 
-            dataset = DatasetDict({"train": concat_dataset})
-            dataset.push_to_hub("emc348/imagenet-sdxl-vae-uint8")
-    except Exception as e:
-        print(
-            i,
-            sample,
-            sample["vae_output"].max(),
-            sample["vae_output"].min(),
-            sample["label"],
-        )
+        dataset = DatasetDict({f"train_{count}": dataset_new_rows})
+        dataset.push_to_hub("emc348/imagenet-sdxl-vae-uint8")
+        new_rows = []
+
+        count += 1
+dataset_new_rows = Dataset.from_list(new_rows)
+concat_dataset = concatenate_datasets([train_dataset, dataset_new_rows])
+
+dataset = DatasetDict({"train": concat_dataset})
+dataset.push_to_hub("emc348/imagenet-sdxl-vae-uint8")
