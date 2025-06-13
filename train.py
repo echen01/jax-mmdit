@@ -332,7 +332,7 @@ def process_batch(
         image_jnp = image_jnp.transpose((0, 3, 1, 2))
         image_jnp = normalize_images(image_jnp)
     else:
-        image_jnp = image_jnp / 255 - 0.5
+        image_jnp = (image_jnp / 255 - 0.5) * 2
     label = jnp.asarray(batch[label_field_name], dtype=jnp.float32)
     if label.ndim == 2:
         label = label[:, 0]

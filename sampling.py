@@ -176,7 +176,7 @@ def rectified_flow_sample(
 
         @jax.jit
         def vae_decode(sample: Array) -> Array:
-            return vae.apply(vae_params, sample * 24, method="decode")  # type: ignore
+            return vae.apply(vae_params, sample * 12, method="decode")  # type: ignore
 
         for i in range(len(outs)):
             outs[i] = vae_decode(outs[i])
