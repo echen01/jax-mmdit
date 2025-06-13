@@ -385,7 +385,7 @@ def run_eval(
     """
     num_eval_batches = 1
     eval_iter = tqdm(
-        eval_dataset.iter(batch_size=16, drop_last_batch=True),
+        eval_dataset.iter(batch_size=32, drop_last_batch=True),
         leave=False,
         total=num_eval_batches,
         dynamic_ncols=True,
@@ -416,7 +416,7 @@ def run_eval(
         summary_writer.add_scalar("eval_loss", eval_loss, global_step)
 
         # Sampling
-        if do_sample:
+        if do_sample and jax.process_index() == 0:
             sample_key, rng = random.split(rng)
             n_labels_to_sample = (
                 dataset_config.n_labels_to_sample
@@ -523,10 +523,11 @@ def main(
                 dataset_config.image_field_name,
                 dataset_config.using_latents,
             )
-
+            """
             logger.info(
                 f"Host {jax.process_index()}: images.shape={images.shape}, labels.shape={labels.shape}"
             )
+            """
 
             images, labels = jax.device_put((images, labels), trainer.data_sharding)
 
