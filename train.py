@@ -40,7 +40,7 @@ from vae.vae_flax import load_pretrained_vae
 jax.experimental.compilation_cache.compilation_cache.set_cache_dir("jit_cache")
 
 if jax.process_index() == 0:
-    logger.info("JAX host count: ", jax.process_count())
+    logger.info(f"JAX host count: {jax.process_count()}")
     logger.info(f"JAX device count: {jax.device_count()}")
 
 
@@ -459,7 +459,7 @@ def main(
     assert dataset_name in DATASET_CONFIGS, f"Invalid dataset name: {dataset_name}"
 
     dataset_config = DATASET_CONFIGS[dataset_name]
-    dataset: DatasetDict = load_dataset(dataset_config.hf_dataset_uri, streaming=not dataset_config.using_latents)  # type: ignore
+    dataset: DatasetDict = load_dataset(dataset_config.hf_dataset_uri, streaming=False)  # type: ignore
     if not dataset_config.eval_split_name:
         dataset_config.eval_split_name = "test"
         dataset = dataset["train"].train_test_split(test_size=0.1)
@@ -488,7 +488,7 @@ def main(
     n_evals = 0
     for epoch in range(n_epochs):
         iter_description_dict.update({"epoch": epoch})
-        n_batches = n_samples // dataset_config.batch_size
+        n_batches = n_samples // dataset_config.batch_size // jax.process_count()
         train_iter = tqdm(
             train_dataset.iter(
                 batch_size=dataset_config.batch_size, drop_last_batch=True
