@@ -294,9 +294,8 @@ class Trainer:
             self.setup_vae()
 
     def save_checkpoint(self, global_step: int):
-        if jax.process_index() == 0:
-            state = nnx.state(self.model)
-            self.checkpoint_manager.save(global_step, args=ocp.args.StandardSave(state))  # type: ignore
+        state = nnx.state(self.model)
+        self.checkpoint_manager.save(global_step, args=ocp.args.StandardSave(state))  # type: ignore
 
     def setup_vae(self, vae_path: str = "pcuenq/stable-diffusion-xl-base-1.0-flax"):
         self.vae, self.vae_params = load_pretrained_vae(vae_path, True, subfolder="vae")
@@ -363,7 +362,6 @@ def run_eval(
         leave=False,
         total=num_eval_batches,
         dynamic_ncols=True,
-        disable=jax.process_index() != 0,
     )
 
     for j, eval_batch in enumerate(eval_iter):
@@ -565,8 +563,11 @@ def main(
             train_iter.set_postfix(iter_description_dict)
 
             if global_step % eval_save_steps == 0 or profile:
-
-                trainer.save_checkpoint(global_step)
+                if jax.process_index() == 0:
+                    trainer.save_checkpoint(global_step)
+                jax.experimental.multihost_utils.sync_global_devices(
+                    "after_checkpoint_save"
+                )
                 run_eval(
                     eval_dataset,
                     n_eval_batches,
@@ -585,7 +586,12 @@ def main(
                 return
 
         if epoch % sample_every_n == 0 and not profile:
+            if jax.process_index() == 0:
+                trainer.save_checkpoint(global_step)
             trainer.save_checkpoint(global_step)
+            jax.experimental.multihost_utils.sync_global_devices(
+                "after_checkpoint_save"
+            )
             run_eval(
                 eval_dataset,
                 n_eval_batches,
