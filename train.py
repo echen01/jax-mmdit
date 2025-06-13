@@ -405,7 +405,7 @@ def run_eval(
             dataset_config.using_latents,
         )
 
-        # images, labels = jax.device_put((images, labels), trainer.data_sharding)
+        images, labels = jax.device_put((images, labels), trainer.data_sharding)
 
         rng = random.PRNGKey(0)
         rng = jax.device_put(rng, trainer.key_sharding)
@@ -537,6 +537,8 @@ def main(
                 f"Host {jax.process_index()}: images.shape={images.shape}, labels.shape={labels.shape}"
             )
             """
+            images = jax.make_array_from_process_local_data(trainer.data_sharding, images)  # type: ignore
+            labels = jax.make_array_from_process_local_data(trainer.data_sharding, labels)  # type: ignore
 
             images, labels = jax.device_put((images, labels), trainer.data_sharding)
 
