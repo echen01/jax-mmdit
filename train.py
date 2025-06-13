@@ -115,7 +115,7 @@ DATASET_CONFIGS = {
         label_field_name="label",
         n_labels_to_sample=10,
         eval_split_name=None,
-        batch_size=64,
+        batch_size=32,
         model_config=DIT_MODELS["XL_2"],
         using_latents=True,
     ),
@@ -295,7 +295,6 @@ class Trainer:
 
     def save_checkpoint(self, global_step: int):
         state = nnx.state(self.model)
-        jax.block_until_ready(state)  # Ensure the state is ready before saving
         self.checkpoint_manager.save(global_step, args=ocp.args.StandardSave(state))  # type: ignore
 
     def setup_vae(self, vae_path: str = "pcuenq/stable-diffusion-xl-base-1.0-flax"):
@@ -433,7 +432,7 @@ def run_eval(
 def main(
     n_epochs: int = 100,
     learning_rate: float = 1e-4,
-    eval_save_steps: int = 500,
+    eval_save_steps: int = 250,
     n_eval_batches: int = 1,
     sample_every_n: int = 1,
     dataset_name: str = "imagenet",
@@ -598,6 +597,8 @@ def main(
                 True,
                 epoch,
             )
+
+    trainer.save_checkpoint(global_step)
 
 
 if __name__ == "__main__":
