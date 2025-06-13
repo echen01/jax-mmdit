@@ -495,7 +495,6 @@ def main(
             total=n_batches,
             leave=False,
             dynamic_ncols=True,
-            disable=jax.process_index() != 0,
         )
         for i, batch in enumerate(train_iter):
 
@@ -510,11 +509,7 @@ def main(
                 dataset_config.image_field_name,
                 dataset_config.using_latents,
             )
-            """
-            logger.info(
-                f"Host {jax.process_index()}: images.shape={images.shape}, labels.shape={labels.shape}"
-            )
-            """
+
             images = jax.make_array_from_process_local_data(trainer.data_sharding, images)  # type: ignore
             labels = jax.make_array_from_process_local_data(trainer.data_sharding, labels)  # type: ignore
 
