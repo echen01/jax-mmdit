@@ -333,7 +333,6 @@ def process_batch(
         image_jnp = normalize_images(image_jnp)
     else:
         image_jnp = image_jnp / 255 - 0.5
-        image_jnp = image_jnp * 24
     label = jnp.asarray(batch[label_field_name], dtype=jnp.float32)
     if label.ndim == 2:
         label = label[:, 0]
@@ -404,6 +403,9 @@ def run_eval(
             dataset_config.image_field_name,
             dataset_config.using_latents,
         )
+
+        images = jax.make_array_from_process_local_data(trainer.data_sharding, images)  # type: ignore
+        labels = jax.make_array_from_process_local_data(trainer.data_sharding, labels)  # type: ignore
 
         images, labels = jax.device_put((images, labels), trainer.data_sharding)
 
