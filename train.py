@@ -9,7 +9,7 @@ from typing import Any, List, Optional, Tuple, cast, Dict
 import fire
 import jax
 
-jax.distributed.initialize()
+jax.distributed.initialize(coordinator_address="10.128.0.17:6000")
 
 import jax.experimental.compilation_cache.compilation_cache
 import jax.numpy as jnp
@@ -391,11 +391,10 @@ def run_eval(
         dynamic_ncols=True,
     )
 
-    for j, raw_eval_batch in enumerate(eval_iter):
+    for j, eval_batch in enumerate(eval_iter):
         if j >= n_eval_batches:
             break
 
-        eval_batch = multihost_utils.broadcast_one_to_all(raw_eval_batch)
         # Eval loss
         images, labels = process_batch(
             eval_batch,
@@ -489,6 +488,13 @@ def main(
     train_dataset = dataset[dataset_config.train_split_name]
     eval_dataset = dataset[dataset_config.eval_split_name]
 
+    train_dataset = train_dataset.shard(
+        jax.process_count(), jax.process_index()
+    )  # shard train dataset across hosts
+    eval_dataset = eval_dataset.shard(
+        jax.process_count(), jax.process_index()
+    )  # shard eval dataset across hosts
+
     device_count = jax.device_count()
     rng = random.PRNGKey(0)
 
@@ -518,8 +524,7 @@ def main(
             global_step = epoch * (n_samples // dataset_config.batch_size) + i
 
             # Train step
-
-            images, labels = process_batch_multihost(
+            images, labels = process_batch(
                 batch,
                 dataset_config.latent_size,
                 dataset_config.n_channels,
@@ -584,8 +589,8 @@ def main(
             train_iter.set_postfix(iter_description_dict)
 
             if global_step % eval_save_steps == 0 or profile:
-                if jax.process_index() == 0:
-                    trainer.save_checkpoint(global_step)
+
+                trainer.save_checkpoint(global_step)
                 run_eval(
                     eval_dataset,
                     n_eval_batches,
