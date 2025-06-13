@@ -290,15 +290,14 @@ class Trainer:
         state = nnx.state(self.model)
         # Async checkpointer for saving checkpoints across processes
         base_dir_abs = os.getcwd()
-        options = ocp.CheckpointManagerOptions(max_to_keep=3)
+        # options = ocp.CheckpointManagerOptions(max_to_keep=3)
 
-        with ocp.CheckpointManager(
-            ocp.test_utils.erase_and_create_empty(
-                os.path.join(base_dir_abs, "checkpoints")
-            ),
-            options=options,
-        ) as mngr:
-            mngr.save(global_step, args=ocp.args.StandardSave(state))  # type: ignore
+        path = ocp.test_utils.erase_and_create_empty(
+            os.path.join(base_dir_abs, "checkpoints")
+        )
+        checkpointer = ocp.StandardCheckpointer()
+
+        checkpointer.save(path / "latest", state)  # type: ignore
 
     def setup_vae(self, vae_path: str = "pcuenq/stable-diffusion-xl-base-1.0-flax"):
         self.vae, self.vae_params = load_pretrained_vae(vae_path, True, subfolder="vae")
