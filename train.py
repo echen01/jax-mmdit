@@ -9,7 +9,7 @@ from typing import Any, List, Optional, Tuple, cast, Dict
 import fire
 import jax
 
-jax.distributed.initialize(coordinator_address="localhost:12345")
+jax.distributed.initialize()
 
 import jax.experimental.compilation_cache.compilation_cache
 import jax.numpy as jnp
@@ -115,7 +115,7 @@ DATASET_CONFIGS = {
         label_field_name="label",
         n_labels_to_sample=10,
         eval_split_name=None,
-        batch_size=8 * 8,
+        batch_size=4 * 16,
         model_config=DIT_MODELS["XL_2"],
         using_latents=True,
     ),
