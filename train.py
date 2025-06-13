@@ -35,7 +35,7 @@ from profiling import memory_usage_params, trace_module_calls, get_peak_flops
 from jax import Array
 
 from vae.vae_flax import load_pretrained_vae
-from jax.experimental import multihost_utils
+
 
 jax.experimental.compilation_cache.compilation_cache.set_cache_dir("jit_cache")
 
@@ -340,6 +340,34 @@ def process_batch(
     return image_jnp, label
 
 
+from jax.experimental import multihost_utils
+
+
+def process_batch_multihost(
+    batch: Any,
+    latent_size: int,
+    n_channels: int,
+    label_field_name: str,
+    image_field_name: str,
+    using_latents: bool = False,
+) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    # Process batch as before
+    images, labels = process_batch(
+        batch,
+        latent_size,
+        n_channels,
+        label_field_name,
+        image_field_name,
+        using_latents,
+    )
+
+    # Ensure all hosts have the same data
+    images = multihost_utils.broadcast_one_to_all(images)
+    labels = multihost_utils.broadcast_one_to_all(labels)
+
+    return images, labels
+
+
 def run_eval(
     eval_dataset: Dataset,
     n_eval_batches: int,
@@ -473,37 +501,21 @@ def main(
     for epoch in range(n_epochs):
         iter_description_dict.update({"epoch": epoch})
         n_batches = n_samples // dataset_config.batch_size
+        train_iter = tqdm(
+            train_dataset.iter(
+                batch_size=dataset_config.batch_size // 8, drop_last_batch=True
+            ),
+            total=n_batches,
+            leave=False,
+            dynamic_ncols=True,
+        )
+        for i, batch in enumerate(train_iter):
 
-        # Only host 0 creates the iterator
-        if jax.process_index() == 0:
-            train_iter = train_dataset.iter(
-                batch_size=dataset_config.batch_size, drop_last_batch=True
-            )
-        else:
-            train_iter = None
-
-        for i in range(n_batches):  # Use range instead of iterating directly
             global_step = epoch * (n_samples // dataset_config.batch_size) + i
 
-            # Load batch on host 0 and broadcast
-            if jax.process_index() == 0:
-                try:
-                    batch = next(train_iter)
-                except StopIteration:
-                    break
-            else:
-                batch = None
+            # Train step
 
-            # Broadcast batch to all hosts
-            batch = multihost_utils.broadcast_one_to_all(
-                batch, is_source=(jax.process_index() == 0)
-            )
-
-            if batch is None:
-                break
-
-            # Process batch (now all hosts have identical data)
-            images, labels = process_batch(
+            images, labels = process_batch_multihost(
                 batch,
                 dataset_config.latent_size,
                 dataset_config.n_channels,
