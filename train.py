@@ -295,6 +295,7 @@ class Trainer:
 
     def save_checkpoint(self, global_step: int):
         state = nnx.state(self.model)
+        jax.block_until_ready(state)  # Ensure the state is ready before saving
         self.checkpoint_manager.save(global_step, args=ocp.args.StandardSave(state))  # type: ignore
 
     def setup_vae(self, vae_path: str = "pcuenq/stable-diffusion-xl-base-1.0-flax"):
