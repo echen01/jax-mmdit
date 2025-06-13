@@ -43,15 +43,16 @@ dataset = StreamingDataset(
     batch_size=32,
 )
 
-train_dataset: Dataset = Dataset.from_dict(
-    {"label": [], "label_as_text": [], "vae_output": []}
-)
+train_dataset: Dataset = Dataset.from_dict({"label": [], "vae_output": []})
 train_dataset.set_format(type="numpy")
 new_rows = []
 
 for i, sample in enumerate(dataset):
-
-    new_rows.append(sample)
+    new_sample = {
+        "label": int(sample["label"]),
+        "vae_output": sample["vae_output"],
+    }
+    new_rows.append(new_sample)
 
     if i % 500000 == 0 and i > 0:
         logger.info(f"Uploading at iteration {i}...")
