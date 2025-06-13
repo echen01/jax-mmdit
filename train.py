@@ -497,10 +497,10 @@ def main(
                     dataset_config.using_latents,
                 )
 
-            # Add this before device_put to debug
-            logger.info(
-                f"Host {jax.process_index()}: images.shape={images.shape}, labels.shape={labels.shape}"
-            )
+                # Add this before device_put to debug
+                logger.info(
+                    f"Host {jax.process_index()}: images.shape={images.shape}, labels.shape={labels.shape}"
+                )
 
             images, labels = jax.device_put((images, labels), trainer.data_sharding)
 
