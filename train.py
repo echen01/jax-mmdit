@@ -475,7 +475,7 @@ def main(
         n_batches = n_samples // dataset_config.batch_size
         train_iter = tqdm(
             train_dataset.iter(
-                batch_size=dataset_config.batch_size, drop_last_batch=True
+                batch_size=dataset_config.batch_size // 8, drop_last_batch=True
             ),
             total=n_batches,
             leave=False,
@@ -487,20 +487,19 @@ def main(
 
             # Train step
 
-            if jax.process_index() == 0:
-                images, labels = process_batch(
-                    batch,
-                    dataset_config.latent_size,
-                    dataset_config.n_channels,
-                    dataset_config.label_field_name,
-                    dataset_config.image_field_name,
-                    dataset_config.using_latents,
-                )
+            images, labels = process_batch(
+                batch,
+                dataset_config.latent_size,
+                dataset_config.n_channels,
+                dataset_config.label_field_name,
+                dataset_config.image_field_name,
+                dataset_config.using_latents,
+            )
 
-                # Add this before device_put to debug
-                logger.info(
-                    f"Host {jax.process_index()}: images.shape={images.shape}, labels.shape={labels.shape}"
-                )
+            # Add this before device_put to debug
+            logger.info(
+                f"Host {jax.process_index()}: images.shape={images.shape}, labels.shape={labels.shape}"
+            )
 
             images, labels = jax.device_put((images, labels), trainer.data_sharding)
 
