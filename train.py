@@ -3,13 +3,12 @@ from loguru import logger
 import os
 import time
 from contextlib import nullcontext
-from dataclasses import dataclass, field
 from typing import Any, List, Optional, Tuple, cast, Dict
 
-import fire
+import tyro
 import jax
 
-jax.distributed.initialize()
+# jax.distributed.initialize()
 
 import jax.experimental.compilation_cache.compilation_cache
 import jax.numpy as jnp
@@ -28,14 +27,20 @@ from PIL import Image
 from tensorboardX import SummaryWriter
 from tqdm import tqdm
 
-from labels import IMAGENET_LABELS_NAMES
 from model import DiTModel
 from sampling import rectified_flow_sample, rectified_flow_step
-from utils import center_crop, ensure_directory, image_grid, normalize_images
+from utils import (
+    center_crop,
+    ensure_directory,
+    image_grid,
+    normalize_images,
+    process_raw_dict,
+)
 from profiling import memory_usage_params, trace_module_calls, get_peak_flops
 from jax import Array
 
 from vae.vae_flax import load_pretrained_vae
+from options import AllConfigs, Config
 
 
 jax.experimental.compilation_cache.compilation_cache.set_cache_dir("jit_cache")
@@ -51,184 +56,30 @@ def fmt_float_display(val: Array | float | int) -> str:
     return f"{val:3.3f}"
 
 
-@dataclass
-class ModelConfig:
-    """
-    Modifiable params for the model's architecture.
-    """
-
-    dim: int
-    n_layers: int
-    n_heads: int
-    patch_size: int = 2
-
-
-DIT_MODELS = {
-    "XL_2": ModelConfig(n_layers=28, dim=1152, patch_size=2, n_heads=16),
-    "XL_4": ModelConfig(n_layers=28, dim=1152, patch_size=4, n_heads=16),
-    "XL_8": ModelConfig(n_layers=28, dim=1152, patch_size=8, n_heads=16),
-    "L_2": ModelConfig(n_layers=24, dim=1024, patch_size=2, n_heads=16),
-    "L_4": ModelConfig(n_layers=24, dim=1024, patch_size=4, n_heads=16),
-    "L_8": ModelConfig(n_layers=24, dim=1024, patch_size=8, n_heads=16),
-    "B_2": ModelConfig(n_layers=12, dim=768, patch_size=2, n_heads=12),
-    "B_4": ModelConfig(n_layers=12, dim=768, patch_size=4, n_heads=12),
-    "B_8": ModelConfig(n_layers=12, dim=768, patch_size=8, n_heads=12),
-    "S_2": ModelConfig(n_layers=12, dim=384, patch_size=2, n_heads=6),
-    "S_4": ModelConfig(n_layers=12, dim=384, patch_size=4, n_heads=6),
-    "S_8": ModelConfig(n_layers=12, dim=384, patch_size=8, n_heads=6),
-}
-
-
-@dataclass
-class DatasetConfig:
-    """
-    Contains all the necessary information to load a dataset and preprocess it.
-    """
-
-    hf_dataset_uri: str
-    n_classes: int
-    latent_size: int
-    eval_split_name: Optional[str] = None
-    train_split_name: str = "train"
-    image_field_name: str = "image"
-    label_field_name: str = "label"
-    label_names: Optional[List[str]] = None
-    n_channels: int = 3
-    n_labels_to_sample: Optional[int] = None
-    batch_size: int = 256
-    # used for streaming datasets
-    dataset_length: Optional[int] = None
-
-    model_config: ModelConfig = field(default_factory=lambda: DIT_MODELS["B_2"])
-
-    using_latents: bool = False
-
-
-DATASET_CONFIGS = {
-    "imagenet_vae": DatasetConfig(
-        hf_dataset_uri="emc348/imagenet-sdxl-vae-uint8",
-        n_classes=1000,
-        latent_size=32,
-        n_channels=4,
-        label_names=list(IMAGENET_LABELS_NAMES.values()),
-        image_field_name="vae_output",
-        label_field_name="label",
-        n_labels_to_sample=10,
-        eval_split_name=None,
-        batch_size=288,
-        model_config=DIT_MODELS["XL_2"],
-        using_latents=True,
-    ),
-    # https://huggingface.co/datasets/zh-plus/tiny-imagenet
-    "imagenet": DatasetConfig(
-        hf_dataset_uri="evanarlian/imagenet_1k_resized_256",
-        n_classes=1000,
-        latent_size=32,
-        n_channels=3,
-        dataset_length=1281167,
-        label_names=list(IMAGENET_LABELS_NAMES.values()),
-        image_field_name="image",
-        label_field_name="label",
-        n_labels_to_sample=10,
-        eval_split_name="val",
-        batch_size=154 * 4,
-        model_config=DIT_MODELS["XL_2"],
-    ),
-    # https://huggingface.co/datasets/cifar10
-    "cifar10": DatasetConfig(
-        hf_dataset_uri="cifar10",
-        n_classes=10,
-        image_field_name="img",
-        latent_size=32,
-        label_names=[
-            "airplane",
-            "automobile",
-            "bird",
-            "cat",
-            "deer",
-            "dog",
-            "frog",
-            "horse",
-            "ship",
-            "truck",
-        ],
-        eval_split_name="test",
-        dataset_length=50000,
-        model_config=DIT_MODELS["B_2"],
-        batch_size=96,
-    ),
-    # TODO find the class counts and resize with preprocessor
-    "butterflies": DatasetConfig(
-        hf_dataset_uri="ceyda/smithsonian_butterflies",
-        n_channels=3,
-        n_classes=25,
-        latent_size=64,
-    ),
-    "mnist": DatasetConfig(
-        hf_dataset_uri="ylecun/mnist",
-        n_channels=1,
-        n_classes=10,
-        latent_size=28,
-        batch_size=256,  # 796 * 4,
-        eval_split_name="test",
-        dataset_length=60000,
-    ),
-    "flowers": DatasetConfig(
-        hf_dataset_uri="nelorth/oxford-flowers",
-        n_channels=3,
-        n_classes=102,
-        latent_size=32,
-        batch_size=256,
-        n_labels_to_sample=16,
-        eval_split_name="test",
-        model_config=ModelConfig(dim=64, n_layers=10, n_heads=8),
-    ),
-    "fashion_mnist": DatasetConfig(
-        hf_dataset_uri="fashion_mnist",
-        n_channels=1,
-        n_classes=10,
-        latent_size=28,
-        label_names=[
-            "T-shirt/top",
-            "Trouser",
-            "Pullover",
-            "Dress",
-            "Coat",
-            "Sandal",
-            "Shirt",
-            "Sneaker",
-            "Bag",
-            "Ankle boot",
-        ],
-    ),
-}
-
-
 class Trainer:
 
     def __init__(
         self,
         rng: PRNGKey,
-        dataset_config: DatasetConfig,
+        config: Config,
         learning_rate: float = 5e-5,
         profile: bool = False,
-        half_precision: bool = False,
     ) -> None:
 
         init_key, self.train_key = random.split(rng, 2)
-        latent_size, n_channels = dataset_config.latent_size, dataset_config.n_channels
-        dtype = jnp.bfloat16 if half_precision else jnp.float32
+        latent_size, n_channels = config.latent_size, config.n_channels
+        dtype = jnp.bfloat16 if config.half_precision else jnp.float32
 
         @nnx.jit
         def create_sharded_model():
             model = DiTModel(
-                dim=dataset_config.model_config.dim,
-                n_layers=dataset_config.model_config.n_layers,
-                n_heads=dataset_config.model_config.n_heads,
+                dim=config.model_config.dim,
+                n_layers=config.model_config.n_layers,
+                n_heads=config.model_config.n_heads,
                 input_size=latent_size,
                 in_channels=n_channels,
                 out_channels=n_channels,
-                n_classes=dataset_config.n_classes,
+                n_classes=config.n_classes,
                 dtype=dtype,
                 rngs=nnx.Rngs(init_key),
             )
@@ -262,6 +113,42 @@ class Trainer:
         with self.mesh:
             self.model = create_sharded_model()
 
+        ckpt_options = ocp.CheckpointManagerOptions(
+            max_to_keep=3,
+            best_mode="min",
+            multiprocessing_options=ocp.options.MultiprocessingOptions(
+                primary_host=None
+            ),
+        )
+
+        if config.resume:
+            ckpt_path = os.path.join(os.getcwd(), "checkpoints")
+        else:
+            ckpt_path = ocp.test_utils.erase_and_create_empty(
+                os.path.join(os.getcwd(), "checkpoints")
+            )
+
+        self.checkpointer = ocp.CheckpointManager(
+            ckpt_path,
+            options=ckpt_options,
+        )
+
+        if config.resume:
+            abs_model = nnx.eval_shape(
+                lambda: DiTModel(
+                    dim=config.model_config.dim,
+                    n_layers=config.model_config.n_layers,
+                    n_heads=config.model_config.n_heads,
+                    input_size=latent_size,
+                    in_channels=n_channels,
+                    out_channels=n_channels,
+                    n_classes=config.n_classes,
+                    dtype=dtype,
+                    rngs=nnx.Rngs(init_key),
+                )
+            )
+            self.resume_checkpoint(abs_model)
+
         self.optimizer = nnx.Optimizer(self.model, optax.adam(learning_rate))
 
         params = nnx.state(self.model, nnx.Param)
@@ -269,7 +156,6 @@ class Trainer:
 
         if jax.process_index() == 0:
             logger.info(f"Model parameter count: {total_params} using: {total_bytes}")
-            logger.info("JIT compiling step functions...")
 
         self.train_step = nnx.jit(
             functools.partial(rectified_flow_step, training=True),
@@ -279,25 +165,46 @@ class Trainer:
             functools.partial(rectified_flow_step, training=False),
         )
 
-        self.flops_for_step = 0
+        # self.flops_for_step = 0
 
-        if dataset_config.using_latents:
+        if config.using_latents:
             if jax.process_index() == 0:
                 logger.info("Loading VAE...")
             self.setup_vae()
 
-    def save_checkpoint(self, global_step: int):
-        state = nnx.state(self.model)
-        # Async checkpointer for saving checkpoints across processes
-        base_dir_abs = os.getcwd()
-        # options = ocp.CheckpointManagerOptions(max_to_keep=3)
+    def save_checkpoint(self, global_step: int, eval_loss: Optional[float] = None):
 
-        path = ocp.test_utils.erase_and_create_empty(
-            os.path.join(base_dir_abs, "checkpoints")
+        state = nnx.state(self.model, nnx.Param)
+
+        self.checkpointer.save(
+            global_step,
+            args=ocp.args.StandardSave(state),
+            metrics={
+                "eval_loss": eval_loss,
+            },
         )
-        checkpointer = ocp.StandardCheckpointer()
+        self.checkpointer.wait_until_finished()
 
-        checkpointer.save(path / "latest", state)  # type: ignore
+    def resume_checkpoint(self, abs_model):
+
+        abs_state = nnx.state(abs_model, nnx.Param)
+
+        abs_state = jax.tree.map(
+            lambda a, s: jax.ShapeDtypeStruct(a.shape, a.dtype, sharding=s),
+            abs_state,
+            nnx.get_named_sharding(abs_state, self.mesh),
+        )
+
+        latest_step = self.checkpointer.latest_step()
+        if jax.process_index() == 0:
+            logger.info(f"Resuming from checkpoint at step {latest_step}...")
+
+        restored_state = self.checkpointer.restore(
+            latest_step, args=ocp.args.StandardRestore(abs_state)
+        )
+        self.checkpointer.wait_until_finished()
+
+        nnx.update(self.model, restored_state)
 
     def setup_vae(self, vae_path: str = "pcuenq/stable-diffusion-xl-base-1.0-flax"):
         self.vae, self.vae_params = load_pretrained_vae(vae_path, True, subfolder="vae")
@@ -346,7 +253,7 @@ def process_batch(
 def run_eval(
     eval_dataset: Dataset,
     n_eval_batches: int,
-    dataset_config: DatasetConfig,
+    config: Config,
     trainer: Trainer,
     rng: PRNGKey,
     summary_writer: SummaryWriter,
@@ -374,11 +281,11 @@ def run_eval(
         # Eval loss
         images, labels = process_batch(
             eval_batch,
-            dataset_config.latent_size,
-            dataset_config.n_channels,
-            dataset_config.label_field_name,
-            dataset_config.image_field_name,
-            dataset_config.using_latents,
+            config.latent_size,
+            config.n_channels,
+            config.label_field_name,
+            config.image_field_name,
+            config.using_latents,
         )
 
         images = jax.make_array_from_process_local_data(trainer.data_sharding, images)  # type: ignore
@@ -401,15 +308,15 @@ def run_eval(
         if do_sample:
             sample_key, rng = random.split(rng)
             n_labels_to_sample = (
-                dataset_config.n_labels_to_sample
-                if dataset_config.n_labels_to_sample
-                else dataset_config.n_classes
+                config.n_labels_to_sample
+                if config.n_labels_to_sample
+                else config.n_classes
             )
             noise_shape = (
                 n_labels_to_sample,
-                dataset_config.n_channels,
-                dataset_config.latent_size,
-                dataset_config.latent_size,
+                config.n_channels,
+                config.latent_size,
+                config.latent_size,
             )
             init_noise = random.normal(sample_rng, noise_shape)
             labels = jnp.arange(0, n_labels_to_sample)
@@ -420,9 +327,7 @@ def run_eval(
                 labels,
                 sample_key,
                 decoder=(
-                    (trainer.vae, trainer.vae_params)
-                    if dataset_config.using_latents
-                    else None
+                    (trainer.vae, trainer.vae_params) if config.using_latents else None
                 ),
                 null_cond=null_cond,
                 sample_steps=50,
@@ -431,18 +336,10 @@ def run_eval(
             sample_img_filename = f"samples/epoch_{epoch}_globalstep_{global_step}.png"
             grid.save(sample_img_filename)
 
+    return eval_loss.item()
 
-def main(
-    n_epochs: int = 100,
-    learning_rate: float = 1e-4,
-    eval_save_steps: int = 500,
-    n_eval_batches: int = 1,
-    sample_every_n: int = 1,
-    dataset_name: str = "imagenet",
-    profile: bool = False,
-    half_precision: bool = False,
-    **kwargs,
-):
+
+def main():
     """
     Arguments:
         n_epochs: Number of epochs to train for.
@@ -451,25 +348,29 @@ def main(
         eval_save_steps: Number of steps between evaluation runs and checkpoint saves.
         n_eval_batches: Number of batches to evaluate on.
         sample_every_n: Number of epochs between sampling runs.
-        dataset_name: Name of the dataset config to select, valid options are in DATASET_CONFIGS.
+        dataset_name: Name of the dataset config to select, valid options are in configS.
         profile: Run a single train and eval step, and print out the cost analysis, then exit.
         half_precision: case the model to fp16 for training.
     """
 
-    assert not kwargs, f"Unrecognized arguments: {kwargs.keys()}"
-    assert dataset_name in DATASET_CONFIGS, f"Invalid dataset name: {dataset_name}"
+    config = tyro.cli(AllConfigs)
+    learning_rate = config.learning_rate
+    n_epochs = config.n_epochs
+    eval_save_steps = config.eval_save_steps
+    n_eval_batches = config.n_eval_batches
+    sample_every_n = config.sample_every_n
+    profile = config.profile
 
-    dataset_config = DATASET_CONFIGS[dataset_name]
-    dataset: DatasetDict = load_dataset(dataset_config.hf_dataset_uri, streaming=False)  # type: ignore
-    if not dataset_config.eval_split_name:
-        dataset_config.eval_split_name = "test"
-        if dataset_config.using_latents:
-            dataset = concatenate_datasets([dataset[f"train_{i}"] for i in range(3)])  # type: ignore
+    dataset: DatasetDict = load_dataset(config.hf_dataset_uri, streaming=False)  # type: ignore
+    if not config.eval_split_name:
+        config.eval_split_name = "test"
+        if config.using_latents:
+            dataset = concatenate_datasets([dataset[f"train_{i}"] for i in range(1)])  # type: ignore
             dataset = dataset.train_test_split(test_size=0.1)  # type: ignore
         else:
             dataset = dataset["train"].train_test_split(test_size=0.1)
-    train_dataset = dataset[dataset_config.train_split_name]
-    eval_dataset = dataset[dataset_config.eval_split_name]
+    train_dataset = dataset[config.train_split_name]
+    eval_dataset = dataset[config.eval_split_name]
 
     train_dataset = train_dataset.shard(
         jax.process_count(), jax.process_index()
@@ -481,7 +382,12 @@ def main(
     device_count = jax.device_count()
     rng = random.PRNGKey(0)
 
-    trainer = Trainer(rng, dataset_config, learning_rate, profile, half_precision)
+    trainer = Trainer(
+        rng,
+        config,
+        learning_rate,
+        profile,
+    )
 
     summary_writer = SummaryWriter(flush_secs=1, max_queue=1)
     ensure_directory("samples", clear=True)
@@ -493,11 +399,9 @@ def main(
     n_evals = 0
     for epoch in range(n_epochs):
         iter_description_dict.update({"epoch": epoch})
-        n_batches = n_samples // dataset_config.batch_size
+        n_batches = n_samples // config.batch_size
         train_iter = tqdm(
-            train_dataset.iter(
-                batch_size=dataset_config.batch_size, drop_last_batch=True
-            ),
+            train_dataset.iter(batch_size=config.batch_size, drop_last_batch=True),
             total=n_batches,
             leave=False,
             dynamic_ncols=True,
@@ -510,11 +414,11 @@ def main(
             # Train step
             images, labels = process_batch(
                 batch,
-                dataset_config.latent_size,
-                dataset_config.n_channels,
-                dataset_config.label_field_name,
-                dataset_config.image_field_name,
-                dataset_config.using_latents,
+                config.latent_size,
+                config.n_channels,
+                config.label_field_name,
+                config.image_field_name,
+                config.using_latents,
             )
 
             images = jax.make_array_from_process_local_data(trainer.data_sharding, images)  # type: ignore
@@ -540,6 +444,7 @@ def main(
                 )
 
                 step_duration = time.perf_counter() - step_start_time
+                """
                 flops_device_sec = trainer.flops_for_step / (
                     step_duration * device_count
                 )
@@ -552,6 +457,7 @@ def main(
                         "mfu": fmt_float_display(mfu),
                     }
                 )
+                """
 
                 summary_writer.add_scalar(
                     "train_step_time",
@@ -571,12 +477,11 @@ def main(
             train_iter.set_postfix(iter_description_dict)
 
             if global_step % eval_save_steps == 0 or profile:
-                trainer.save_checkpoint(global_step)
 
-                run_eval(
+                eval_loss = run_eval(
                     eval_dataset,
                     n_eval_batches,
-                    dataset_config,
+                    config,
                     trainer,
                     rng,
                     summary_writer,
@@ -586,17 +491,18 @@ def main(
                     epoch,
                 )
 
+                trainer.save_checkpoint(global_step, eval_loss)
+
             if profile:
                 logger.info("\nExiting after profiling a single step.")
                 return
 
         if epoch % sample_every_n == 0 and not profile:
-            trainer.save_checkpoint(global_step)
 
             run_eval(
                 eval_dataset,
                 n_eval_batches,
-                dataset_config,
+                config,
                 trainer,
                 rng,
                 summary_writer,
@@ -606,8 +512,10 @@ def main(
                 epoch,
             )
 
+            trainer.save_checkpoint(global_step, eval_loss)
+
     trainer.save_checkpoint(global_step)
 
 
 if __name__ == "__main__":
-    fire.Fire(main)
+    main()

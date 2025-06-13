@@ -96,7 +96,6 @@ class Attention(nnx.Module):
         self.dim = dim
         self.n_heads = n_heads
         self.dtype = dtype
-        self.rngs = rngs
 
         self.head_dim = dim // n_heads
 
@@ -269,7 +268,6 @@ class TransformerBlock(nnx.Module):
         self.ffn_dim_multiplier = ffn_dim_multiplier
         self.norm_eps = norm_eps
         self.dtype = dtype
-        self.rngs = rngs
 
         self.attention = Attention(dim=dim, n_heads=n_heads, dtype=dtype, rngs=rngs)
         self.feed_forward = FeedForward(

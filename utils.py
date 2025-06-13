@@ -4,6 +4,7 @@ from pathlib import Path
 import shutil
 import jax.numpy as jnp
 from jax import Array
+from flax import nnx
 
 
 def image_grid(image_list: List[List[Image.Image]]) -> Image.Image:
@@ -75,3 +76,13 @@ def center_crop(image: Image.Image, crop_width: int, crop_height: int):
 
     img_cropped = image.crop((left, top, right, bottom))
     return img_cropped
+
+
+def process_raw_dict(raw_state_dict):
+    flattened = nnx.traversals.flatten_mapping(raw_state_dict)
+    # Cut the '.value' postfix on every leaf path.
+    flattened = {
+        (path[:-1] if path[-1] == "value" else path): value
+        for path, value in flattened.items()
+    }
+    return nnx.traversals.unflatten_mapping(flattened)

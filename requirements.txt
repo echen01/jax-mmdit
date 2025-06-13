@@ -2,7 +2,7 @@ jax
 optax
 flax
 tqdm
-fire
+tyro
 datasets[jax]
 tensorboardX
 imageio
