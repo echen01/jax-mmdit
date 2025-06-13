@@ -116,7 +116,7 @@ DATASET_CONFIGS = {
         label_field_name="label",
         n_labels_to_sample=10,
         eval_split_name=None,
-        batch_size=int(16 * jax.process_count()),
+        batch_size=int(8 * jax.process_count()),
         model_config=DIT_MODELS["XL_2"],
         using_latents=True,
     ),
