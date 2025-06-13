@@ -8,6 +8,9 @@ from typing import Any, List, Optional, Tuple, cast, Dict
 
 import fire
 import jax
+
+jax.distributed.initialize()
+
 import jax.experimental.compilation_cache.compilation_cache
 import jax.numpy as jnp
 import optax
@@ -33,7 +36,6 @@ from jax import Array
 
 from vae.vae_flax import load_pretrained_vae
 
-jax.distributed.initialize()
 
 jax.experimental.compilation_cache.compilation_cache.set_cache_dir("jit_cache")
 
