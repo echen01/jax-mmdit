@@ -290,7 +290,9 @@ class TransformerBlock(nnx.Module):
             nnx.Linear(
                 min(dim, 1024),
                 6 * dim,
-                kernel_init=nnx.initializers.xavier_uniform(),
+                kernel_init=initializers.zeros,
+                bias_init=initializers.zeros,
+                use_bias=True,
                 rngs=rngs,
             ),
         )
@@ -354,7 +356,14 @@ class FinalLayer(nnx.Module):
         self.adaLN_modulation = nnx.Sequential(
             nnx.Linear(min(dim, 1024), min(dim, 1024), use_bias=True, rngs=rngs),
             nnx.silu,
-            nnx.Linear(min(dim, 1024), 2 * dim, use_bias=True, rngs=rngs),
+            nnx.Linear(
+                min(dim, 1024),
+                2 * dim,
+                use_bias=True,
+                kernel_init=initializers.zeros,
+                bias_init=initializers.zeros,
+                rngs=rngs,
+            ),
         )
 
     def __call__(self, x: Array, c: Optional[Array]):

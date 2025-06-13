@@ -247,13 +247,6 @@ class Trainer:
             logger.info(f"Available devices: {jax.devices()}")
             logger.info(f"Device mesh: {device_mesh}")
 
-        # Async checkpointer for saving checkpoints across processes
-        base_dir_abs = os.getcwd()
-        options = ocp.CheckpointManagerOptions(max_to_keep=3)
-        self.checkpoint_manager = ocp.CheckpointManager(
-            f"{base_dir_abs}/checkpoints", options=options
-        )
-
         # The axes are (data, model), so the mesh is (n_devices, 1) as the model is replicated across devices.
         # This object corresponds the axis names to the layout of the physical devices,
         # so that sharding a tensor along the axes shards according to the corresponding device_mesh layout.
@@ -295,7 +288,17 @@ class Trainer:
 
     def save_checkpoint(self, global_step: int):
         state = nnx.state(self.model)
-        self.checkpoint_manager.save(global_step, args=ocp.args.StandardSave(state))  # type: ignore
+        # Async checkpointer for saving checkpoints across processes
+        base_dir_abs = os.getcwd()
+        options = ocp.CheckpointManagerOptions(max_to_keep=3)
+
+        with ocp.CheckpointManager(
+            ocp.test_utils.erase_and_create_empty(
+                os.path.join(base_dir_abs, "checkpoints")
+            ),
+            options=options,
+        ) as mngr:
+            mngr.save(global_step, args=ocp.args.StandardSave(state))  # type: ignore
 
     def setup_vae(self, vae_path: str = "pcuenq/stable-diffusion-xl-base-1.0-flax"):
         self.vae, self.vae_params = load_pretrained_vae(vae_path, True, subfolder="vae")
