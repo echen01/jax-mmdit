@@ -416,7 +416,7 @@ def run_eval(
         summary_writer.add_scalar("eval_loss", eval_loss, global_step)
 
         # Sampling
-        if do_sample and jax.process_index() == 0:
+        if do_sample and jax.process_index() == 6:
             sample_key, rng = random.split(rng)
             n_labels_to_sample = (
                 dataset_config.n_labels_to_sample
@@ -580,7 +580,8 @@ def main(
             train_iter.set_postfix(iter_description_dict)
 
             if global_step % eval_save_steps == 0 or profile:
-                trainer.save_checkpoint(global_step)
+                if jax.process_index() == 0:
+                    trainer.save_checkpoint(global_step)
                 run_eval(
                     eval_dataset,
                     n_eval_batches,
