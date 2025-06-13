@@ -239,15 +239,13 @@ class Trainer:
             return model
 
         n_devices = len(jax.devices())
-        if jax.process_index() == 0:
-            logger.info(f"Available devices: {jax.devices()}")
+        logger.info(f"Available devices: {jax.devices()}")
 
         # Create a device mesh according to the physical layout of the devices.
         # device_mesh is just an ndarray
         device_mesh = mesh_utils.create_device_mesh((n_devices, 1))
 
-        if jax.process_index() == 0:
-            logger.info(f"Device mesh: {device_mesh}")
+        logger.info(f"Device mesh: {device_mesh}")
 
         # Async checkpointer for saving checkpoints across processes
         base_dir_abs = os.getcwd()
@@ -262,9 +260,8 @@ class Trainer:
         # i.e. with device layout of (8, 1), data would be replicated to all devices, and model would be replicated to 1 device.
         self.mesh = Mesh(device_mesh, axis_names=("data", "model"))
 
-        if jax.process_index() == 0:
-            logger.info(f"Mesh: {self.mesh}")
-            logger.info(f"Initializing model...")
+        logger.info(f"Mesh: {self.mesh}")
+        logger.info(f"Initializing model...")
 
         self.data_sharding = NamedSharding(self.mesh, PartitionSpec("data"))
         self.key_sharding = NamedSharding(self.mesh, PartitionSpec())
@@ -277,9 +274,8 @@ class Trainer:
         params = nnx.state(self.model, nnx.Param)
         total_bytes, total_params = memory_usage_params(params)
 
-        if jax.process_index() == 0:
-            logger.info(f"Model parameter count: {total_params} using: {total_bytes}")
-            logger.info("JIT compiling step functions...")
+        logger.info(f"Model parameter count: {total_params} using: {total_bytes}")
+        logger.info("JIT compiling step functions...")
 
         self.train_step = nnx.jit(
             functools.partial(rectified_flow_step, training=True),
@@ -292,8 +288,7 @@ class Trainer:
         self.flops_for_step = 0
 
         if dataset_config.using_latents:
-            if jax.process_index() == 0:
-                logger.info("Loading VAE...")
+            logger.info("Loading VAE...")
             self.setup_vae()
 
     def save_checkpoint(self, global_step: int):
@@ -498,6 +493,11 @@ def main(
                 dataset_config.label_field_name,
                 dataset_config.image_field_name,
                 dataset_config.using_latents,
+            )
+
+            # Add this before device_put to debug
+            logger.info(
+                f"Host {jax.process_index()}: images.shape={images.shape}, labels.shape={labels.shape}"
             )
 
             images, labels = jax.device_put((images, labels), trainer.data_sharding)
