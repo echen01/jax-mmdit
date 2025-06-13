@@ -650,7 +650,7 @@ class FlaxAutoencoderKL(nn.Module):
 
 def load_pretrained_vae(
     hf_model_id: str,
-    flax: bool = False, 
+    flax: bool = False,
     subfolder: Optional[str] = None,
 ) -> Tuple[FlaxAutoencoderKL, Any]:
     folder_path = snapshot_download(hf_model_id)
@@ -664,18 +664,13 @@ def load_pretrained_vae(
 
     weights_name = TORCH_WEIGHTS_NAME if not flax else "diffusion_flax_model.msgpack"
 
-    logger.info(f"Loading weights bytes..")
     flax_weights_bytes = open(os.path.join(folder_path, weights_name), "rb").read()
-    logger.info(f"Loading state dict..")
     model = FlaxAutoencoderKL(config)
-    logger.info(f"Initializing weights..")
     variables = model.init_weights(jax.random.PRNGKey(0))
     if not flax:
         state_dict = load(flax_weights_bytes)
-        logger.info(f"Converting state dict..")
-        state_dict = convert_pytorch_state_dict_to_flax(state_dict, variables['params'])
+        state_dict = convert_pytorch_state_dict_to_flax(state_dict, variables["params"])
     else:
-        logger.info(f"Loading state dict..")
         state_dict = from_bytes(FlaxAutoencoderKL, flax_weights_bytes)
     variables["params"] = state_dict
     return model, variables

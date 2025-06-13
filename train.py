@@ -239,12 +239,12 @@ class Trainer:
             return model
 
         n_devices = len(jax.devices())
-        logger.info(f"Available devices: {jax.devices()}")
 
         # Create a device mesh according to the physical layout of the devices.
         # device_mesh is just an ndarray
         device_mesh = mesh_utils.create_device_mesh((n_devices, 1))
         if jax.process_index() == 0:
+            logger.info(f"Available devices: {jax.devices()}")
             logger.info(f"Device mesh: {device_mesh}")
 
         # Async checkpointer for saving checkpoints across processes
@@ -289,7 +289,8 @@ class Trainer:
         self.flops_for_step = 0
 
         if dataset_config.using_latents:
-            logger.info("Loading VAE...")
+            if jax.process_index() == 0:
+                logger.info("Loading VAE...")
             self.setup_vae()
 
     def save_checkpoint(self, global_step: int):
