@@ -169,7 +169,7 @@ DATASET_CONFIGS = {
         n_channels=1,
         n_classes=10,
         latent_size=28,
-        batch_size=128,  # 796 * 4,
+        batch_size=256,  # 796 * 4,
         eval_split_name="test",
         dataset_length=60000,
     ),
@@ -432,7 +432,7 @@ def run_eval(
 def main(
     n_epochs: int = 100,
     learning_rate: float = 1e-4,
-    eval_save_steps: int = 250,
+    eval_save_steps: int = 500,
     n_eval_batches: int = 1,
     sample_every_n: int = 1,
     dataset_name: str = "imagenet",
@@ -563,7 +563,7 @@ def main(
             train_iter.set_postfix(iter_description_dict)
 
             if global_step % eval_save_steps == 0 or profile:
-                # trainer.save_checkpoint(global_step)
+                trainer.save_checkpoint(global_step)
 
                 run_eval(
                     eval_dataset,
@@ -583,7 +583,7 @@ def main(
                 return
 
         if epoch % sample_every_n == 0 and not profile:
-            # trainer.save_checkpoint(global_step)
+            trainer.save_checkpoint(global_step)
 
             run_eval(
                 eval_dataset,
