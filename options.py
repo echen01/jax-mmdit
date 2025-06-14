@@ -38,7 +38,7 @@ class Config:
     # Training Options
     n_epochs: int = 100
     learning_rate: float = 1e-4
-    eval_save_steps: int = 500
+    eval_save_steps: int = 50
     n_eval_batches: int = 1
     sample_every_n: int = 1
     profile: bool = False

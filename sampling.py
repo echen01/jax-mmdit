@@ -70,6 +70,7 @@ def rectified_flow_step(
         https://huggingface.co/blog/Isamu136/insta-rectified-flow
         Sample a single timestep and get loss
         """
+
         b = image.shape[0]
         if ln:
             t = jax.nn.sigmoid(random.normal(rng_key, (b,)))
@@ -81,7 +82,7 @@ def rectified_flow_step(
         # zt is the mixture of x and z1 at timestep t
         zt = (1 - texp) * image + texp * z1
         # vtheta is the output of the model - predicts velocity at timestep t
-        vtheta = model(zt, t, label, training)
+        vtheta = model(zt, t, label, rng_key, training)
         # MSE of the model output and the noise
         # can think of this as predicting velocity for each timestep, with the expected
         # velocity being constant for all timesteps
@@ -123,7 +124,7 @@ def ddpm_step(
         )
 
         ts_scaled = _ts / n_timesteps
-        loss = model(x_t, ts_scaled, label, training)
+        loss = model(x_t, ts_scaled, label, rng_key, training)
         return loss
 
     if training:
@@ -138,10 +139,10 @@ def ddpm_step(
 
 @nnx.jit
 def sample_loop(z, t, cond, model: DiTModel, cfg, null_cond, dt, rng_key):
-    v_cond = model(z, t, cond, train=False)
+    v_cond = model(z, t, cond, rng_key, train=False)
     # CFG
     if null_cond is not None:
-        v_uncond = model(z, t, null_cond, train=False)
+        v_uncond = model(z, t, null_cond, rng_key, train=False)
         v_cond = v_uncond + cfg * (v_cond - v_uncond)
 
     z = z - dt * v_cond

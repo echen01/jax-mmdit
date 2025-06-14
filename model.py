@@ -7,6 +7,7 @@ from jax.nn import initializers
 from typing import Optional
 from flax.nnx import LayerNorm, dot_product_attention
 from jax.lax import Precision
+from typing import Tuple
 
 
 class TimestepEmbedder(nnx.Module):
@@ -63,27 +64,23 @@ class LabelEmbedder(nnx.Module):
             rngs=rngs,
         )
 
-        self.rngs = rngs
-
-    def __call__(self, labels: Array, train: bool, force_drop_ids=None):
+    def __call__(self, labels: Array, rng: PRNGKey, train: bool, force_drop_ids=None):
         use_dropout = self.dropout_prob > 0
         labels = labels.astype(jnp.int32)
 
         # drop N labels from the input
         if (train and use_dropout) or (force_drop_ids is not None):
-            labels = self.token_drop(labels, force_drop_ids)
+            labels = self.token_drop(labels, rng, force_drop_ids)
         embeddings = self.embedding_table(labels)
         return embeddings
 
-    def token_drop(self, labels: Array, force_drop_ids=None):
+    def token_drop(self, labels: Array, rng: PRNGKey, force_drop_ids=None):
         """
         Randomly drop labels from the input. This is needed
         to support unconditional generation.
         """
         if force_drop_ids is None:
-            drop_ids = jax.random.bernoulli(
-                self.rngs.dropout(), self.dropout_prob, labels.shape
-            )
+            drop_ids = jax.random.bernoulli(rng, self.dropout_prob, labels.shape)
         else:
             drop_ids = force_drop_ids == 1
         labels = jnp.where(drop_ids, self.num_classes, labels)
@@ -296,7 +293,11 @@ class TransformerBlock(nnx.Module):
         )
 
     def __call__(
-        self, x: Array, freqs_sin: Array, freqs_cos: Array, adaln_input=None
+        self,
+        x: Array | nnx.Variable,
+        freqs_sin: Array | nnx.Variable,
+        freqs_cos: Array,
+        adaln_input=None,
     ) -> Array:
         if adaln_input is not None:
             shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = jnp.split(
@@ -459,6 +460,8 @@ class DiTModel(nnx.Module):
         self.freqs_sin, self.freqs_cos = self.precompute_freqs(
             dim // n_heads, max_pos_encoding
         )
+        self.freqs_sin = nnx.Variable(self.freqs_sin)
+        self.freqs_cos = nnx.Variable(self.freqs_cos)
 
     def patchify(self, x: Array):
         B, C, H, W = x.shape
@@ -490,7 +493,9 @@ class DiTModel(nnx.Module):
         return imgs
 
     @staticmethod
-    def precompute_freqs(dim: int, maxlen: int, theta: float = 1e4):
+    def precompute_freqs(
+        dim: int, maxlen: int, theta: float = 1e4
+    ) -> Tuple[Array, Array]:
         freqs = 1.0 / (theta ** (jnp.arange(0.0, float(dim), 2.0)[: (dim // 2)] / dim))
         t = jnp.arange(maxlen)
         freqs = jnp.outer(t, freqs)
@@ -498,7 +503,9 @@ class DiTModel(nnx.Module):
         freqs_sin = jnp.sin(freqs)
         return freqs_sin, freqs_cos  # (maxlen, dim/2), (maxlen, dim/2)
 
-    def __call__(self, x: Array, t: Array, y: Array, train: bool):
+    def __call__(
+        self, x: Array, t: Array, y: Array, rng: PRNGKey, train: bool
+    ) -> Array:
         """
         x: latent or image tensor of shape (B, C, H, W)
         t: timestep tensor of shape (B,)
@@ -515,7 +522,7 @@ class DiTModel(nnx.Module):
         x += self.pos_embedding(jnp.arange(x.shape[1]))
 
         t = self.t_embedder(t)
-        y = self.y_embedder(y, train=train)
+        y = self.y_embedder(y, rng=rng, train=train)
 
         adaln_input = t.astype(x.dtype) + y.astype(x.dtype)
 
@@ -526,10 +533,12 @@ class DiTModel(nnx.Module):
         x = self.unpatchify(x)
         return x
 
-    def forward_with_cfg(self, x, t, y, cfg_scale, train):
+    def forward_with_cfg(
+        self, x: Array, t: Array, y: Array, cfg_scale: float, rng: PRNGKey, train: bool
+    ) -> Array:
         half = x[: len(x) // 2]
         combined = jnp.concatenate([half, half], axis=0)
-        model_out = self(combined, t, y, train)
+        model_out = self(combined, t, y, rng, train)
         eps, rest = model_out[:, : self.in_channels], model_out[:, self.in_channels :]
         cond_eps, uncond_eps = jnp.split(eps, 2, axis=0)
         half_eps = uncond_eps + cfg_scale * (cond_eps - uncond_eps)

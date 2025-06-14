@@ -1,6 +1,7 @@
 import functools
 from loguru import logger
 import os
+
 import time
 from contextlib import nullcontext
 from typing import Any, List, Optional, Tuple, cast, Dict
@@ -34,7 +35,6 @@ from utils import (
     ensure_directory,
     image_grid,
     normalize_images,
-    process_raw_dict,
 )
 from profiling import memory_usage_params, trace_module_calls, get_peak_flops
 from jax import Array
@@ -94,9 +94,6 @@ class Trainer:
         # Create a device mesh according to the physical layout of the devices.
         # device_mesh is just an ndarray
         device_mesh = mesh_utils.create_device_mesh((n_devices, 1))
-        if jax.process_index() == 0:
-            logger.info(f"Available devices: {jax.devices()}")
-            logger.info(f"Device mesh: {device_mesh}")
 
         # The axes are (data, model), so the mesh is (n_devices, 1) as the model is replicated across devices.
         # This object corresponds the axis names to the layout of the physical devices,
@@ -113,9 +110,16 @@ class Trainer:
         with self.mesh:
             self.model = create_sharded_model()
 
+        params = nnx.state(self.model, nnx.Param)
+        total_bytes, total_params = memory_usage_params(params)
+
+        if jax.process_index() == 0:
+            logger.info(f"Model parameter count: {total_params} using: {total_bytes}")
+
         ckpt_options = ocp.CheckpointManagerOptions(
             max_to_keep=3,
             best_mode="min",
+            best_fn=lambda m: m["eval_loss"],
             multiprocessing_options=ocp.options.MultiprocessingOptions(
                 primary_host=None
             ),
@@ -151,12 +155,6 @@ class Trainer:
 
         self.optimizer = nnx.Optimizer(self.model, optax.adam(learning_rate))
 
-        params = nnx.state(self.model, nnx.Param)
-        total_bytes, total_params = memory_usage_params(params)
-
-        if jax.process_index() == 0:
-            logger.info(f"Model parameter count: {total_params} using: {total_bytes}")
-
         self.train_step = nnx.jit(
             functools.partial(rectified_flow_step, training=True),
         )
@@ -174,11 +172,11 @@ class Trainer:
 
     def save_checkpoint(self, global_step: int, eval_loss: Optional[float] = None):
 
-        state = nnx.state(self.model, nnx.Param)
+        state = nnx.state(self.model)
 
         self.checkpointer.save(
             global_step,
-            args=ocp.args.StandardSave(state),
+            args=ocp.args.StandardSave(state),  # type: ignore
             metrics={
                 "eval_loss": eval_loss,
             },
@@ -187,7 +185,7 @@ class Trainer:
 
     def resume_checkpoint(self, abs_model):
 
-        abs_state = nnx.state(abs_model, nnx.Param)
+        graph_def, abs_state = nnx.split(abs_model)
 
         abs_state = jax.tree.map(
             lambda a, s: jax.ShapeDtypeStruct(a.shape, a.dtype, sharding=s),
@@ -195,16 +193,16 @@ class Trainer:
             nnx.get_named_sharding(abs_state, self.mesh),
         )
 
-        latest_step = self.checkpointer.latest_step()
+        resume_step = self.checkpointer.best_step()
         if jax.process_index() == 0:
-            logger.info(f"Resuming from checkpoint at step {latest_step}...")
+            logger.info(f"Resuming from checkpoint at step {resume_step}...")
 
         restored_state = self.checkpointer.restore(
-            latest_step, args=ocp.args.StandardRestore(abs_state)
+            resume_step, args=ocp.args.StandardRestore(abs_state)  # type: ignore
         )
         self.checkpointer.wait_until_finished()
 
-        nnx.update(self.model, restored_state)
+        self.model = nnx.merge(graph_def, restored_state)
 
     def setup_vae(self, vae_path: str = "pcuenq/stable-diffusion-xl-base-1.0-flax"):
         self.vae, self.vae_params = load_pretrained_vae(vae_path, True, subfolder="vae")
@@ -340,25 +338,8 @@ def run_eval(
 
 
 def main():
-    """
-    Arguments:
-        n_epochs: Number of epochs to train for.
-        batch_size: Batch size for training.
-        learning_rate: Learning rate for the optimizer.
-        eval_save_steps: Number of steps between evaluation runs and checkpoint saves.
-        n_eval_batches: Number of batches to evaluate on.
-        sample_every_n: Number of epochs between sampling runs.
-        dataset_name: Name of the dataset config to select, valid options are in configS.
-        profile: Run a single train and eval step, and print out the cost analysis, then exit.
-        half_precision: case the model to fp16 for training.
-    """
-
     config = tyro.cli(AllConfigs)
-    learning_rate = config.learning_rate
-    n_epochs = config.n_epochs
-    eval_save_steps = config.eval_save_steps
-    n_eval_batches = config.n_eval_batches
-    sample_every_n = config.sample_every_n
+
     profile = config.profile
 
     dataset: DatasetDict = load_dataset(config.hf_dataset_uri, streaming=False)  # type: ignore
@@ -385,7 +366,7 @@ def main():
     trainer = Trainer(
         rng,
         config,
-        learning_rate,
+        config.learning_rate,
         profile,
     )
 
@@ -396,8 +377,7 @@ def main():
 
     n_samples = len(train_dataset)
 
-    n_evals = 0
-    for epoch in range(n_epochs):
+    for epoch in range(config.n_epochs):
         iter_description_dict.update({"epoch": epoch})
         n_batches = n_samples // config.batch_size
         train_iter = tqdm(
@@ -407,6 +387,7 @@ def main():
             dynamic_ncols=True,
             disable=jax.process_index() != 0,
         )
+
         for i, batch in enumerate(train_iter):
 
             global_step = epoch * n_batches + i
@@ -469,25 +450,25 @@ def main():
                 {
                     "loss": fmt_float_display(train_loss),
                     "epoch": epoch,
-                    "step": i,
+                    "step": global_step,
                 }
             )
             summary_writer.add_scalar("train_loss", train_loss, global_step)
 
             train_iter.set_postfix(iter_description_dict)
 
-            if global_step % eval_save_steps == 0 or profile:
+            if global_step % config.eval_save_steps == 0 or profile:
 
                 eval_loss = run_eval(
                     eval_dataset,
-                    n_eval_batches,
+                    config.n_eval_batches,
                     config,
                     trainer,
                     rng,
                     summary_writer,
                     iter_description_dict,
                     global_step,
-                    n_evals % sample_every_n == 0,
+                    True,
                     epoch,
                 )
 
@@ -497,24 +478,7 @@ def main():
                 logger.info("\nExiting after profiling a single step.")
                 return
 
-        if epoch % sample_every_n == 0 and not profile:
-
-            run_eval(
-                eval_dataset,
-                n_eval_batches,
-                config,
-                trainer,
-                rng,
-                summary_writer,
-                iter_description_dict,
-                global_step,
-                True,
-                epoch,
-            )
-
-            trainer.save_checkpoint(global_step, eval_loss)
-
-    trainer.save_checkpoint(global_step)
+    trainer.save_checkpoint(global_step, eval_loss)
 
 
 if __name__ == "__main__":
